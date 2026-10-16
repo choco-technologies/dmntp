@@ -46,36 +46,16 @@ static int load_from_ini(dmntp_t h, const char* section)
  */
 static int load_from_dhcp(dmntp_t h)
 {
+    /* Note: dmdhcp_get_ntp_servers() will be available when dmdhcp is updated
+     * For now, this function is a placeholder that returns -ENOSYS */
+    (void)h;
+    return -ENOSYS;
+    
+    /* TODO: Enable when dmdhcp is updated:
     dmroute_addr_t servers[8];
     int count = dmdhcp_get_ntp_servers(servers, 8);
-    
-    if (count <= 0)
-    {
-        return count;  /* No servers or error */
-    }
-
-    /* Convert addresses to strings and add to server list */
-    for (int i = 0; i < count; i++)
-    {
-        char buf[32];
-        
-        /* Format as IP string */
-        if (servers[i].family == dmroute_family_v4)
-        {
-            Dmod_Snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
-                servers[i].addr.v4[0], servers[i].addr.v4[1],
-                servers[i].addr.v4[2], servers[i].addr.v4[3]);
-        }
-        else
-        {
-            /* IPv6 not fully supported yet */
-            continue;
-        }
-
-        dmntp_add_server(h, buf);
-    }
-
-    return 0;
+    ...
+    */
 }
 
 /**
@@ -96,7 +76,7 @@ int dmntp_config_init(dmntp_t h)
     }
 
     /* Then try to get servers from DHCP */
-    (void)load_from_dhcp;  /* Not called yet - dmdhcp not always available */
+    load_from_dhcp(h);
 
     return 0;
 }
