@@ -66,6 +66,7 @@ dmod_add_library(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
     src/dmntp_codec.c
     src/dmntp_servers.c
     src/dmntp_config.c
+    src/dmntp_query.c
 )
 
 target_include_directories(${DMOD_MODULE_NAME} PRIVATE

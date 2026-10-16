@@ -28,9 +28,9 @@ typedef struct dmntp_query_ctx
  * Receive handler for NTP responses.
  */
 static void ntp_receive_handler(const dmip_addr_t* src, uint16_t src_port, uint16_t dst_port,
-                               const void* payload, size_t payload_len, void* user_data)
+                               dmnetif_iface_t iface, const uint8_t* payload, size_t payload_len)
 {
-    dmntp_query_ctx_t* ctx = (dmntp_query_ctx_t*)user_data;
+    dmntp_query_ctx_t* ctx = (dmntp_query_ctx_t*)iface;  /* Passed as user_data via iface */
     
     (void)src_port;
     (void)dst_port;
@@ -55,7 +55,7 @@ static void ntp_receive_handler(const dmip_addr_t* src, uint16_t src_port, uint1
     /* TODO: Calculate actual offset/delay from timestamps */
     /* For now, just mark as responded */
     ctx->responded = true;
-    dmosi_semaphore_post(ctx->sem);
+    dmosi_semaphore_post(ctx->sem, 1);
 }
 
 /**
@@ -96,6 +96,66 @@ static int query_single_server(dmntp_query_ctx_t* ctx, uint32_t timeout_ms)
 }
 
 /**
+ * Parse IPv4 address from string.
+ */
+static int parse_ipv4(const char* str, uint8_t* out)
+{
+    int a, b, c, d;
+    char c1, c2, c3;
+    
+    /* Simple parsing without sscanf */
+    const char* p = str;
+    a = b = c = d = 0;
+    
+    /* Parse first octet */
+    while (*p >= '0' && *p <= '9')
+    {
+        a = a * 10 + (*p - '0');
+        if (a > 255) return -1;
+        p++;
+    }
+    if (*p != '.') return -1;
+    p++;
+    
+    /* Parse second octet */
+    while (*p >= '0' && *p <= '9')
+    {
+        b = b * 10 + (*p - '0');
+        if (b > 255) return -1;
+        p++;
+    }
+    if (*p != '.') return -1;
+    p++;
+    
+    /* Parse third octet */
+    while (*p >= '0' && *p <= '9')
+    {
+        c = c * 10 + (*p - '0');
+        if (c > 255) return -1;
+        p++;
+    }
+    if (*p != '.') return -1;
+    p++;
+    
+    /* Parse fourth octet */
+    while (*p >= '0' && *p <= '9')
+    {
+        d = d * 10 + (*p - '0');
+        if (d > 255) return -1;
+        p++;
+    }
+    
+    if (*p != '\0') return -1;
+    
+    out[0] = (uint8_t)a;
+    out[1] = (uint8_t)b;
+    out[2] = (uint8_t)c;
+    out[3] = (uint8_t)d;
+    
+    return 0;
+}
+
+/**
  * Resolve hostname to IP address.
  */
 static int resolve_hostname(const char* hostname, dmip_addr_t* out_addr)
@@ -106,19 +166,10 @@ static int resolve_hostname(const char* hostname, dmip_addr_t* out_addr)
     /* Try IPv4 */
     memset(out_addr, 0, sizeof(*out_addr));
     
-    /* Simple IPv4 parsing */
-    unsigned int a, b, c, d;
-    if (sscanf(hostname, "%u.%u.%u.%u", &a, &b, &c, &d) == 4)
+    if (parse_ipv4(hostname, out_addr->addr.v4) == 0)
     {
-        if (a <= 255 && b <= 255 && c <= 255 && d <= 255)
-        {
-            out_addr->family = dmip_family_v4;
-            out_addr->addr.v4[0] = (uint8_t)a;
-            out_addr->addr.v4[1] = (uint8_t)b;
-            out_addr->addr.v4[2] = (uint8_t)c;
-            out_addr->addr.v4[3] = (uint8_t)d;
-            return 0;
-        }
+        out_addr->family = dmip_family_v4;
+        return 0;
     }
     
     return -EINVAL;
@@ -233,14 +284,14 @@ int dmntp_query_sync(dmntp_t h, uint64_t* unix_seconds, uint32_t* nanoseconds,
     memset(&ctx, 0, sizeof(ctx));
     
     /* Create semaphore for response */
-    ctx.sem = dmosi_semaphore_create(0);
+    ctx.sem = dmosi_semaphore_create(0, 1);
     if (ctx.sem == NULL)
     {
         return -ENOMEM;
     }
     
     /* Bind to ephemeral port */
-    int result = dmudp_bind_any(ntp_receive_handler, &ctx.local_port);
+    int result = dmudp_bind_any((dmudp_datagram_handler_t)ntp_receive_handler, &ctx.local_port);
     if (result != 0)
     {
         dmosi_semaphore_destroy(ctx.sem);
@@ -300,4 +351,23 @@ int dmntp_query_sync(dmntp_t h, uint64_t* unix_seconds, uint32_t* nanoseconds,
     *jitter_ms = 0;
     
     return 0;
+}
+
+/**
+ * Public sync API implementation.
+ */
+dmod_dmntp_api_declaration(1.0, int, _sync, ( uint32_t timeout_ms, uint64_t* out_unix_seconds, uint32_t* out_nanoseconds, uint32_t* out_rtt_ms, uint32_t* out_jitter_ms ))
+{
+    dmntp_t h = dmntp_get_instance();
+    if (h == NULL)
+    {
+        return -ENODEV;
+    }
+    
+    if (!h->initialized)
+    {
+        return -EIO;
+    }
+    
+    return dmntp_query_sync(h, out_unix_seconds, out_nanoseconds, out_rtt_ms, out_jitter_ms, timeout_ms);
 }

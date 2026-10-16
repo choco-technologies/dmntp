@@ -50,4 +50,16 @@ dmod_dmntp_api(1.0, int, _add_server, ( dmntp_t h, const char* host ));
 
 dmod_dmntp_api(1.0, int, _remove_server, ( dmntp_t h, const char* host ));
 
+/**
+ * @brief Synchronize time with NTP servers.
+ *
+ * @param timeout_ms Timeout per server in milliseconds
+ * @param out_unix_seconds Output: Unix timestamp
+ * @param out_nanoseconds Output: Nanoseconds component
+ * @param out_rtt_ms Output: Round-trip time in ms
+ * @param out_jitter_ms Output: Jitter in ms
+ * @return 0 on success, negative errno
+ */
+dmod_dmntp_api(1.0, int, _sync, ( uint32_t timeout_ms, uint64_t* out_unix_seconds, uint32_t* out_nanoseconds, uint32_t* out_rtt_ms, uint32_t* out_jitter_ms ));
+
 #endif /* DMNTP_H */
