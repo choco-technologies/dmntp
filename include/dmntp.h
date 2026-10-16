@@ -7,6 +7,9 @@
 #include "dmod_types.h"
 #include "dmntp_defs.h"
 
+/* Note: dmntp_protocol.h contains NTP protocol definitions (timestamps, packet format).
+   Other module-specific types are auto-generated during build to dmntp_defs.h */
+
 /**
  * Public API for the dmntp module.
  *
@@ -41,11 +44,10 @@ dmod_dmntp_api(1.0, dmntp_t, _create, ( void ));
  */
 dmod_dmntp_api(1.0, void, _destroy, ( dmntp_t handle ));
 
-/**
- * Example accessor - replace with your module's real API.
- *
- * @return true if handle is a valid, non-NULL instance.
- */
 dmod_dmntp_api(1.0, bool, _is_valid, ( dmntp_t handle ));
 
-#endif // DMNTP_H
+dmod_dmntp_api(1.0, int, _add_server, ( dmntp_t h, const char* host ));
+
+dmod_dmntp_api(1.0, int, _remove_server, ( dmntp_t h, const char* host ));
+
+#endif /* DMNTP_H */
