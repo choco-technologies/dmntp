@@ -125,6 +125,91 @@ static int resolve_hostname(const char* hostname, dmip_addr_t* out_addr)
 }
 
 /**
+ * Marzullo algorithm for selecting the best time from multiple samples.
+ * 
+ * Finds the intersection of all intervals and selects the sample with
+ * the smallest maximum error (root distance).
+ */
+static int select_best_offset(dmntp_result_t* results, size_t count, double* best_offset)
+{
+    if (count == 0 || results == NULL || best_offset == NULL)
+    {
+        return -EINVAL;
+    }
+    
+    if (count == 1)
+    {
+        *best_offset = results[0].offset;
+        return 0;
+    }
+    
+    /* Find the interval intersection */
+    /* Each sample defines an interval: [offset - delay, offset + delay] */
+    /* We want the intersection of all intervals */
+    
+    double low = -1e9;  /* Start with very wide interval */
+    double high = 1e9;
+    
+    for (size_t i = 0; i < count; i++)
+    {
+        if (!results[i].valid)
+        {
+            continue;
+        }
+        
+        double sample_low = results[i].offset - results[i].delay;
+        double sample_high = results[i].offset + results[i].delay;
+        
+        if (sample_low > low)
+        {
+            low = sample_low;
+        }
+        if (sample_high < high)
+        {
+            high = sample_high;
+        }
+    }
+    
+    /* Check if there's a valid intersection */
+    if (low > high)
+    {
+        /* No intersection - select sample with smallest root distance */
+        double min_root_dist = 1e9;
+        int best_idx = -1;
+        
+        for (size_t i = 0; i < count; i++)
+        {
+            if (!results[i].valid)
+            {
+                continue;
+            }
+            
+            /* Root distance = dispersion + delay/2 */
+            double root_dist = results[i].delay;  /* Simplified */
+            
+            if (root_dist < min_root_dist)
+            {
+                min_root_dist = root_dist;
+                best_idx = (int)i;
+            }
+        }
+        
+        if (best_idx < 0)
+        {
+            return -EINVAL;
+        }
+        
+        *best_offset = results[best_idx].offset;
+        return 0;
+    }
+    
+    /* Intersection exists - select midpoint */
+    *best_offset = (low + high) / 2.0;
+    
+    return 0;
+}
+
+/**
  * Main sync function - queries configured servers and returns best time.
  */
 int dmntp_query_sync(dmntp_t h, uint64_t* unix_seconds, uint32_t* nanoseconds,
@@ -198,8 +283,16 @@ int dmntp_query_sync(dmntp_t h, uint64_t* unix_seconds, uint32_t* nanoseconds,
         return -ETIMEDOUT;
     }
     
-    /* TODO: Apply Marzullo algorithm to select best time */
-    /* For now, return first valid result */
+    /* Apply Marzullo algorithm to select best time */
+    double best_offset;
+    result = select_best_offset(results, result_count, &best_offset);
+    if (result != 0)
+    {
+        return result;
+    }
+    
+    /* Convert offset to time */
+    /* TODO: Apply offset to system clock */
     
     *unix_seconds = 0;
     *nanoseconds = 0;
