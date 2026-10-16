@@ -91,4 +91,11 @@ double dmntp_calculate_jitter(const double* offsets, size_t count);
 int dmntp_query_sync(dmntp_t h, uint64_t* unix_seconds, uint32_t* nanoseconds,
                      uint32_t* rtt_ms, uint32_t* jitter_ms, uint32_t timeout_ms);
 
+/* Configuration (in dmntp_config.c) */
+int dmntp_config_init(dmntp_t h);
+int dmntp_config_reload(dmntp_t h);
+
+/* Global instance (in dmntp.c) */
+dmntp_t dmntp_get_instance(void);
+
 #endif /* DMNTP_INTERNAL_H */

@@ -45,6 +45,18 @@ dmod_dmntp_api_declaration(1.0, bool, _is_valid, ( dmntp_t handle ))
     return handle != NULL && handle->magic == DMNTP_MAGIC;
 }
 
+/* Global instance for singleton use */
+static dmntp_t g_instance = NULL;
+
+dmntp_t dmntp_get_instance(void)
+{
+    if (g_instance == NULL)
+    {
+        g_instance = dmntp_create();
+    }
+    return g_instance;
+}
+
 /**
  * @brief Pre-initialization function for the module.
  */
@@ -58,8 +70,26 @@ void dmod_preinit(void)
  */
 int dmod_init(const Dmod_Config_t* Config)
 {
+    (void)Config;
+    
+    /* Get or create the global dmntp instance */
+    dmntp_t h = dmntp_get_instance();
+    if (h == NULL)
+    {
+        return -ENOMEM;
+    }
+    
+    /* Initialize server configuration */
+    int result = dmntp_config_init(h);
+    if (result != 0)
+    {
+        return result;
+    }
+    
+    h->initialized = true;
+    
     if (Dmod_IsFunctionConnected(Dmod_Printf)) {
-        Dmod_Printf("[dmntp] initialized\n");
+        Dmod_Printf("[dmntp] initialized with %u servers\n", h->server_count);
     }
     return 0;
 }
@@ -69,6 +99,12 @@ int dmod_init(const Dmod_Config_t* Config)
  */
 int dmod_deinit(void)
 {
+    if (g_instance != NULL)
+    {
+        dmntp_destroy(g_instance);
+        g_instance = NULL;
+    }
+    
     if (Dmod_IsFunctionConnected(Dmod_Printf)) {
         Dmod_Printf("[dmntp] deinitialized\n");
     }

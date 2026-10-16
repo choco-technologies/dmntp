@@ -65,6 +65,7 @@ dmod_add_library(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
     src/dmntp_registrations.c
     src/dmntp_codec.c
     src/dmntp_servers.c
+    src/dmntp_config.c
 )
 
 target_include_directories(${DMOD_MODULE_NAME} PRIVATE
@@ -88,6 +89,7 @@ dmod_link_modules(${DMOD_MODULE_NAME}
     dmlist
     dmosi
     dmheap
+    dmdhcp
 )
 enable_testing()
 add_subdirectory(tests)
