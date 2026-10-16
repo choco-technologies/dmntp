@@ -1,0 +1,5 @@
+# Include dynamically generated versions list from latest release
+$include https://github.com/choco-technologies/dmntp/releases/download/vlatest/versions.dmm
+
+# Module entry with version placeholder - expanded by $version-available
+dmntp https://github.com/choco-technologies/dmntp/releases/download/v<version>/dmntp-v<version>-<arch_name>.zip
