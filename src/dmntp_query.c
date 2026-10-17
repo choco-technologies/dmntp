@@ -173,5 +173,15 @@ dmod_dmntp_api_declaration(1.0, int, _sync_with, (dmntp_t h, uint32_t timeout,
 dmod_dmntp_api_declaration(1.0, int, _sync, (uint32_t timeout,
     uint64_t* seconds, uint32_t* ns, uint32_t* rtt, uint32_t* jitter))
 {
-    return dmntp_query_sync(dmntp_get_instance(), timeout, seconds, ns, rtt, jitter);
+    dmntp_t original = dmntp_get_instance(), snapshot = NULL;
+    int rc = original && original->discover ? dmntp_discover(&snapshot) : 0;
+    if (!rc) rc = dmntp_query_sync(snapshot ? snapshot : original, timeout, seconds, ns, rtt, jitter);
+    else {
+        if (seconds) *seconds = 0;
+        if (ns) *ns = 0;
+        if (rtt) *rtt = 0;
+        if (jitter) *jitter = 0;
+    }
+    dmntp_destroy(snapshot);
+    return rc;
 }

@@ -4,7 +4,19 @@
 #include <assert.h>
 #include <stdio.h>
 static uint32_t ticks;
-static int mode, binds, semaphores, sends;
+static int mode, binds, semaphores, sends, offered;
+const char* dmod_dmntp_provide_servers_sig = "test-provider";
+static Dmod_Context_t provider;
+static void provide(dmntp_server_sink_t add, void* ctx) {
+    const uint8_t address[4] = {192, 0, 2, 1};
+    if (offered) { assert(!add(ctx, address)); assert(!add(ctx, address)); }
+}
+Dmod_Context_t* Dmod_GetNextDifModule(const char* sig, Dmod_Context_t* last) {
+    (void)sig; return last ? NULL : &provider;
+}
+void* Dmod_GetDifFunction(Dmod_Context_t* module, const char* sig) {
+    (void)sig; assert(module == &provider); return (void*)provide;
+}
 static dmudp_datagram_handler_t receive;
 static dmip_addr_t server = {dmip_family_v4, {{192, 0, 2, 1}}};
 enum { VALID, BAD_ORIGIN, BAD_SOURCE, BAD_PORT, SHORT, KISS, ALARM, BAD_STRATUM,
@@ -96,11 +108,17 @@ int main(void) {
     }
     mode = VALID; ticks = UINT32_MAX - 10; check_sync(h, 0);
     for (unsigned i = 0; i < 100; ++i) check_sync(h, 0);
+    dmntp_t discovered = NULL;
+    offered = 1; assert(!dmntp_discover(&discovered)); assert(discovered && discovered->server_count == 1);
+    dmntp_destroy(discovered);
+    uint64_t sec; uint32_t ns;
+    assert(!dmntp_sync(100, &sec, &ns, NULL, NULL)); assert(sec == 1700000000ULL);
+    offered = 0; assert(!dmntp_discover(&discovered)); assert(!discovered);
     dmntp_destroy(h); assert(!dmod_deinit());
     setenv("DMNTP_SERVERS", "192.0.2.1,fixture", 1); assert(!dmod_init(NULL));
     assert(dmntp_get_instance()->server_count == 2); assert(!dmod_deinit());
     setenv("DMNTP_SERVERS", "", 1); assert(dmod_init(NULL) == -EINVAL);
     unsetenv("DMNTP_SERVERS");
-    printf("NTP transport/lifecycle: 15 response modes, tick wrap, 100 repeat calls, configuration PASS (sends=%d)\n", sends);
+    printf("NTP transport/lifecycle: 15 response modes, tick wrap, 100 repeat calls, configuration/discovery PASS (sends=%d)\n", sends);
     return 0;
 }

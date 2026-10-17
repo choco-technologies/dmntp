@@ -29,3 +29,18 @@ ordinary network. On success the probe prints `NTP_RESULT rc=0`, Unix seconds
 in two 32-bit halves, nanoseconds, RTT and jitter. Compare against host UTC at
 receipt. Repeat calls to check resource cleanup and continued console operation.
 Files sent to `/` live in RAM; a reset removes them. No firmware flash is needed.
+
+## DHCP → NTP integration on the board
+
+Build and load the updated dmdhcp from PR #5 alongside these modules. Run
+`ntp_dhcp_probe` from firmware (or transfer its `.dmfc` and run it by name).
+The probe feeds real DHCP OFFER/ACK/renewal frames through dmnetbridge/dmip/dmudp
+on a RAM-file-backed fixture interface, while real NTP traffic continues on
+eth0. It checks a silent option-42 server (must time out), renewal to a live
+Google NTP server (must succeed), and renewal without option 42 (defaults).
+It temporarily loads an empty device-rule directory to prevent automatic
+networkd/dhcpc instances for the fixture, then unregisters the interface and
+restores `/configs/rules`. Existing eth0 services remain active.
+
+This test assumes the real eth0 lease does not itself provide NTP servers;
+other active providers could make the negative phase succeed legitimately.

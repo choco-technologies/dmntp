@@ -65,6 +65,7 @@ dmod_add_library(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
     src/dmntp_registrations.c
     src/dmntp_codec.c
     src/dmntp_servers.c
+    src/dmntp_discovery.c
     src/dmntp_config.c
     src/dmntp_query.c
 )

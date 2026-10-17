@@ -6,6 +6,7 @@ int dmntp_config_init(dmntp_t h)
 {
     const char* configured = Dmod_GetEnv("DMNTP_SERVERS");
     if (!configured) {
+        h->discover = true;
         int rc = dmntp_add_server(h, "pool.ntp.org");
         return rc ? rc : dmntp_add_server(h, "time.google.com");
     }

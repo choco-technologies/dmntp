@@ -13,6 +13,7 @@
 #define Dmod_Free free
 #define Dmod_StrDup strdup
 #define Dmod_GetEnv getenv
+#define Dmod_SnPrintf snprintf
 typedef uint64_t Dmod_Timestamp_t;
 typedef struct { unsigned Size; } Dmod_Config_t;
 uint64_t Dmod_GetUptime(void);
@@ -27,6 +28,12 @@ void dmosi_semaphore_destroy(dmosi_semaphore_t sem);
 int dmosi_semaphore_wait(dmosi_semaphore_t sem, uint32_t count, int32_t timeout);
 int dmosi_semaphore_post(dmosi_semaphore_t sem, uint32_t count);
 typedef struct dmntp* dmntp_t;
+typedef struct { unsigned unused; } Dmod_Context_t;
+typedef int (*dmntp_server_sink_t)(void*, const uint8_t*);
+typedef void (*dmod_dmntp_provide_servers_t)(dmntp_server_sink_t, void*);
+extern const char* dmod_dmntp_provide_servers_sig;
+Dmod_Context_t* Dmod_GetNextDifModule(const char*, Dmod_Context_t*);
+void* Dmod_GetDifFunction(Dmod_Context_t*, const char*);
 dmntp_t dmntp_create(void);
 void dmntp_destroy(dmntp_t h);
 bool dmntp_is_valid(dmntp_t h);

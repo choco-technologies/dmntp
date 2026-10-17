@@ -16,8 +16,10 @@ dmntp_destroy(client);
 ```
 
 `dmntp_sync()` uses `pool.ntp.org` and `time.google.com` by default.
-Set `DMNTP_SERVERS=server1,server2` before the library is first loaded to
-replace these defaults. For example, from dmell:
+Without an explicit override, each call first asks optional discovery providers
+for current servers (DHCP option 42 when the updated dmdhcp is loaded), falling
+back to these defaults when none are available. Set `DMNTP_SERVERS=server1,server2`
+before the library is first loaded to override both discovery and defaults. For example, from dmell:
 
 ```text
 export DMNTP_SERVERS=192.168.50.1
@@ -39,9 +41,11 @@ of offsets in the selected overlap. These are diagnostics from one sampling
 round, not long-term accuracy estimates.
 
 NTP is unauthenticated. This version supports NTP era 0 (1970 through the
-February 2036 rollover), IPv4 and at most eight servers. INI parsing and automatic
-DHCP option 42 discovery are not implemented; the DHCP API is tracked separately
-in [dmdhcp PR #5](https://github.com/choco-technologies/dmdhcp/pull/5).
+February 2036 rollover), IPv4 and at most eight servers. DHCP option 42 discovery
+is provided by [dmdhcp PR #5](https://github.com/choco-technologies/dmdhcp/pull/5),
+using the optional `dmntp_provide_servers` DIF. A fresh snapshot is taken for every
+call; stale DHCP addresses are not cached in NTP. Older DHCP modules simply
+provide no NTP servers. INI parsing is not implemented.
 
 ## Build and test
 

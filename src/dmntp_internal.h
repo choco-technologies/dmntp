@@ -16,6 +16,7 @@ struct dmntp {
     dmntp_server_t* servers;
     size_t server_count;
     dmosi_mutex_t lock;
+    bool discover;
 };
 typedef struct {
     double offset, delay, distance;
@@ -36,6 +37,7 @@ int dmntp_select(const dmntp_result_t* samples, size_t count, double* offset, do
 void dmntp_clear_servers(dmntp_t handle);
 int dmntp_config_init(dmntp_t handle);
 dmntp_t dmntp_get_instance(void);
+int dmntp_discover(dmntp_t* snapshot);
 int dmntp_query_init(void);
 void dmntp_query_deinit(void);
 int dmntp_query_sync(dmntp_t handle, uint32_t timeout, uint64_t* seconds,
