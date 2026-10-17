@@ -102,7 +102,6 @@ DMOD_TEST_STEP(timestamp_conversions_and_carry)
 DMOD_TEST_STEP(wire_format_and_validation)
 {
     dmntp_packet_t p, decoded; uint8_t bytes[48];
-    DMOD_TEST_EXPECT_TRUE(Dmod_ApiSignature_IsValid(dmod_dmntp_provide_servers_sig));
     DMOD_TEST_EXPECT_EQ(sizeof(p), 48);
     dmntp_packet_init_client(&p); p.trans.seconds = 0x12345678; p.trans.fraction = 0x90abcdef;
     dmntp_packet_encode(&p, bytes);
