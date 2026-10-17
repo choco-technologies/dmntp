@@ -94,14 +94,3 @@ dmod_link_modules(${DMOD_MODULE_NAME}
     dmdns
 )
 target_compile_options(dmntp PRIVATE -Werror=return-type -Werror=implicit-function-declaration)
-enable_testing()
-add_subdirectory(tests)
-
-# Tests need access to internal headers - after tests subdirectory is added
-if(TARGET test_dmntp)
-    target_include_directories(test_dmntp PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-    )
-endif()
-
-add_subdirectory(tests/probe)

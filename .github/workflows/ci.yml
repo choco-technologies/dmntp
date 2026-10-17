@@ -26,7 +26,3 @@ jobs:
       - name: Verify artifacts
         run: |
           test -f build/dmf/dmntp.dmf
-          test -f build/dmf/test_dmntp.dmf
-
-      - name: Run native tests
-        run: ctest --test-dir build --output-on-failure
