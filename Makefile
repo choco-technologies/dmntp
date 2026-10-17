@@ -1,17 +1,54 @@
-BUILD_DIR ?= build/make
-CMAKE_ARGS ?=
-ifdef DMOD_DIR
-CMAKE_ARGS += -DDMOD_DIR=$(DMOD_DIR)
-endif
-ifdef DMOD_TOOLS_NAME
-CMAKE_ARGS += -DDMOD_TOOLS_NAME=$(DMOD_TOOLS_NAME)
-endif
-.PHONY: all configure test clean
-all: configure
-	cmake --build $(BUILD_DIR) --parallel
-configure:
-	cmake -S . -B $(BUILD_DIR) $(CMAKE_ARGS)
-test: all
-	ctest --test-dir $(BUILD_DIR) --output-on-failure
-clean:
-	cmake --build $(BUILD_DIR) --target clean
+# #############################################################################
+#
+# 	This is an example of a simple library module.
+#
+# #############################################################################
+DMOD_DIR=@DMOD_DIR@
+
+# -----------------------------------------------------------------------------
+#  Paths initialization
+# -----------------------------------------------------------------------------
+include $(DMOD_DIR)/paths.mk
+
+# -----------------------------------------------------------------------------
+#   Module configuration
+# -----------------------------------------------------------------------------
+
+# The name of the module
+DMOD_MODULE_NAME=dmntp
+
+# The version of the module
+DMOD_MODULE_VERSION=0.1
+
+# The name of the author
+DMOD_AUTHOR_NAME=Patryk Kubiak
+
+# The list of C sources
+DMOD_CSOURCES=src/dmntp.c src/dmntp_codec.c src/dmntp_config.c src/dmntp_discovery.c src/dmntp_query.c src/dmntp_registrations.c src/dmntp_servers.c
+
+# The list of C++ sources
+DMOD_CXXSOURCES=
+
+# The list of include directories
+DMOD_INC_DIRS=include
+
+# The list of libraries to link
+DMOD_LIBS=
+
+# The list of definitions
+DMOD_DEFINITIONS=
+
+# -----------------------------------------------------------------------------
+#   List of MAL interfaces implemented by the module
+# -----------------------------------------------------------------------------
+DMOD_MAL_IMPLS=
+
+# -----------------------------------------------------------------------------
+#   List of DIF interfaces implemented by the module
+# -----------------------------------------------------------------------------
+DMOD_DIF_IMPLS=
+
+# -----------------------------------------------------------------------------
+#   Include the dmod app makefile
+# -----------------------------------------------------------------------------
+include $(DMOD_DMF_LIB_FILE_PATH)
