@@ -6,6 +6,7 @@ set(DMOD_PRIORITY           0)
 
 dmod_add_test(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
     dmntp_test.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/dmntp_codec.c
 )
 
 target_include_directories(${DMOD_MODULE_NAME} PRIVATE
@@ -29,4 +30,11 @@ if(DMF_GET_EXECUTABLE AND DMOD_LOADER_EXECUTABLE)
     )
 else()
     message(WARNING "dmf-get/dmod_loader not found - 'ctest' will not run ${DMOD_MODULE_NAME}. Build the tools first with -DDMOD_BUILD_TOOLS=ON")
+endif()
+
+dmod_link_modules(test_dmntp dmosi)
+
+if(DMOD_TOOLS_NAME STREQUAL "arch/x86_64")
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_test(NAME ntp_transport COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/native/run.py)
 endif()

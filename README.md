@@ -1,104 +1,73 @@
 # dmntp
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![CI](https://github.com/choco-technologies/dmntp/actions/workflows/ci.yml/badge.svg)](https://github.com/choco-technologies/dmntp/actions/workflows/ci.yml)
-
-dmntp DMOD library module.
-
-## Description
-
-TODO: describe what this module does.
-
-## Building
-
-### Using CMake
-
-```bash
-mkdir -p build
-cd build
-cmake ..
-cmake --build .
-```
-
-Pass `-DDMOD_DIR=/path/to/local/dmod` to build against a local dmod checkout
-instead of fetching `develop` from GitHub.
-
-### Using Make
-
-```bash
-make DMOD_MODE=DMOD_MODULE DMOD_DIR=/path/to/dmod
-```
-
-## Testing
-
-Tests are built automatically alongside the module (see `tests/`). Once built,
-run them with `ctest`:
-
-```bash
-cd build
-ctest --output-on-failure
-```
-
-`ctest` installs the test module's dependencies with `dmf-get` and then runs
-it through `dmod_loader`. To run it manually instead:
-
-```bash
-export DMOD_DMF_DIR=$(pwd)/build/dmf
-dmf-get install -d ${DMOD_DMF_DIR}/test_dmntp-local.dmd -y
-dmod_loader build/dmf/test_dmntp.dmf
-```
-
-## Usage
-
-<TBD>
-
-This library module provides functions that can be used by other modules:
+Blocking NTPv4 time sampling for DMOD. Resolves IPv4 literals and DNS names,
+queries servers over UDP/123 and returns POSIX UTC with nanoseconds, RTT and
+jitter. It does not write an RTC or run a background clock discipline loop.
 
 ```c
 #include "dmntp.h"
+
+dmntp_t client = dmntp_create();
+dmntp_add_server(client, "pool.ntp.org");
+uint64_t seconds;
+uint32_t nanoseconds;
+int rc = dmntp_sync_with(client, 1000, &seconds, &nanoseconds, NULL, NULL);
+dmntp_destroy(client);
 ```
 
-## API
+`dmntp_sync()` uses `pool.ntp.org` and `time.google.com` by default.
+Set `DMNTP_SERVERS=server1,server2` before the library is first loaded to
+replace these defaults. For example, from dmell:
 
-| Function | Description |
-|----------|-------------|
-| `dmntp_create()` | Create a new `dmntp_t` instance. |
-| `dmntp_destroy()` | Destroy an instance created by `_create()`. |
-| `dmntp_is_valid()` | Check whether a handle is a valid instance. |
-
-See [include/dmntp.h](include/dmntp.h) for the full
-declarations and [docs/api-reference.md](docs/api-reference.md) for the
-complete reference.
-
-## Documentation
-
-See the `docs/` directory:
-
-- **[api-reference.md](docs/api-reference.md)** - Complete API documentation
-
-View documentation using `dmf-man dmntp`.
-## Project Structure
-
-```
-dmntp/
-├── docs/              # Documentation (markdown format)
-├── include/           # Public headers
-│   └── dmntp.h
-├── src/
-│   └── dmntp.c
-├── tests/
-│   ├── CMakeLists.txt
-│   └── dmntp_test.c
-├── CMakeLists.txt
-├── Makefile
-├── dmntp.dmr
-└── manifest.dmm
+```text
+export DMNTP_SERVERS=192.168.50.1
+ntpprobe
+ntpprobe time.google.com
 ```
 
-## Author
+Explicit handles start with no servers. Lists accept up to eight distinct
+servers; adding a duplicate is idempotent. Calls serialize, including across
+handles. Network processing must remain active while a query blocks: do not
+call from an RX callback or the network pump itself.
 
-Patryk Kubiak
+Each exchange validates the source address/port, echoed request timestamp,
+version, server mode, leap status, stratum, timestamp ordering and root distance.
+With multiple responding sources, the maximum interval overlap must contain a
+strict majority; disagreement returns `-EAGAIN`. RTT is the minimum measured
+network delay among responding servers; jitter is the sample standard deviation
+of offsets in the selected overlap. These are diagnostics from one sampling
+round, not long-term accuracy estimates.
 
-## License
+NTP is unauthenticated. This version supports NTP era 0 (1970 through the
+February 2036 rollover), IPv4 and at most eight servers. INI parsing and automatic
+DHCP option 42 discovery are not implemented; the DHCP API is tracked separately
+in [dmdhcp PR #5](https://github.com/choco-technologies/dmdhcp/pull/5).
 
-MIT
+## Build and test
+
+```sh
+cmake -S . -B build/native
+cmake --build build/native --parallel
+ctest --test-dir build/native --output-on-failure
+python3 tests/native/run.py
+```
+
+Use `-DDMOD_DIR=/path/to/dmod` to use an existing checkout. For STM32F746G-DISCO,
+configure with `-DDMOD_TOOLS_NAME=arch/armv7/cortex-m7`. Dependencies are dynamic
+DMOD modules, including `dmudp`, `dmdns` and the platform's `dmosi`.
+
+The native transport fixture compiles the real library sources with a fake
+platform boundary. It covers valid/malformed/spoofed responses, timeouts, DNS and
+send errors, immediate and duplicate replies, callbacks after cleanup, tick
+wraparound, repeated calls and configuration. Run it with sanitizers using:
+
+```sh
+NTP_TEST_CFLAGS='-fsanitize=address,undefined -g' python3 tests/native/run.py
+```
+
+On hardware, load `dmntp.dmfc`, `test_dmntp.dmfc` and `ntpprobe.dmfc` from the
+same build. Run `test_dmntp`, then `ntpprobe [SERVER]`; compare the returned
+`seconds_hi`/`seconds_lo` and `ns` with a trusted UTC clock. See
+[tests/probe/README.md](tests/probe/README.md) for the UART procedure.
+
+[API reference](docs/api-reference.md) · [MIT license](LICENSE)

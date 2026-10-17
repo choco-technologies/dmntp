@@ -1,112 +1,46 @@
-/**
- * @file dmntp.c
- * @brief DMOD lifecycle (dmod_init()/_deinit()) for dmntp
- */
-#include "dmod.h"
 #include "dmntp_internal.h"
-
 #include <string.h>
-
-dmod_dmntp_api_declaration(1.0, dmntp_t, _create, ( void ))
+static dmntp_t g_instance;
+dmod_dmntp_api_declaration(1.0, dmntp_t, _create, (void))
 {
-    struct dmntp* instance = Dmod_Malloc(sizeof(*instance));
-    if (instance == NULL) {
-        return NULL;
-    }
-
-    memset(instance, 0, sizeof(*instance));
-    instance->magic = DMNTP_MAGIC;
-    instance->servers = NULL;
-    instance->server_count = 0;
-    instance->initialized = false;
-
-    return instance;
+    dmntp_t h = Dmod_Malloc(sizeof(*h));
+    if (!h) return NULL;
+    memset(h, 0, sizeof(*h));
+    h->lock = dmosi_mutex_create(false);
+    if (!h->lock) { Dmod_Free(h); return NULL; }
+    h->magic = DMNTP_MAGIC;
+    return h;
 }
-
-dmod_dmntp_api_declaration(1.0, void, _destroy, ( dmntp_t handle ))
+dmod_dmntp_api_declaration(1.0, void, _destroy, (dmntp_t h))
 {
-    if (handle == NULL) {
-        return;
-    }
-
-    if (handle->magic != DMNTP_MAGIC) {
-        return;  /* Invalid handle */
-    }
-
-    /* Free server list */
-    dmntp_clear_servers(handle);
-
-    handle->magic = 0;
-    Dmod_Free(handle);
+    if (!dmntp_is_valid(h)) return;
+    dmntp_clear_servers(h);
+    dmosi_mutex_destroy(h->lock);
+    h->magic = 0;
+    Dmod_Free(h);
 }
-
-dmod_dmntp_api_declaration(1.0, bool, _is_valid, ( dmntp_t handle ))
+dmod_dmntp_api_declaration(1.0, bool, _is_valid, (dmntp_t h))
 {
-    return handle != NULL && handle->magic == DMNTP_MAGIC;
+    return h && h->magic == DMNTP_MAGIC;
 }
-
-/* Global instance for singleton use */
-static dmntp_t g_instance = NULL;
-
-dmntp_t dmntp_get_instance(void)
+dmntp_t dmntp_get_instance(void) { return g_instance; }
+int dmod_init(const Dmod_Config_t* config)
 {
-    if (g_instance == NULL)
-    {
-        g_instance = dmntp_create();
+    (void)config;
+    int rc = dmntp_query_init();
+    if (rc) return rc;
+    g_instance = dmntp_create();
+    if (!g_instance) { dmntp_query_deinit(); return -ENOMEM; }
+    rc = dmntp_config_init(g_instance);
+    if (rc) {
+        dmntp_destroy(g_instance); g_instance = NULL;
+        dmntp_query_deinit();
     }
-    return g_instance;
+    return rc;
 }
-
-/**
- * @brief Pre-initialization function for the module.
- */
-void dmod_preinit(void)
-{
-    /* No pre-init needed */
-}
-
-/**
- * @brief Initialization function for the module.
- */
-int dmod_init(const Dmod_Config_t* Config)
-{
-    (void)Config;
-    
-    /* Get or create the global dmntp instance */
-    dmntp_t h = dmntp_get_instance();
-    if (h == NULL)
-    {
-        return -ENOMEM;
-    }
-    
-    /* Initialize server configuration */
-    int result = dmntp_config_init(h);
-    if (result != 0)
-    {
-        return result;
-    }
-    
-    h->initialized = true;
-    
-    if (Dmod_IsFunctionConnected(Dmod_Printf)) {
-        Dmod_Printf("[dmntp] initialized with %u servers\n", h->server_count);
-    }
-    return 0;
-}
-
-/**
- * @brief De-initialization function for the module.
- */
 int dmod_deinit(void)
 {
-    if (g_instance != NULL)
-    {
-        dmntp_destroy(g_instance);
-        g_instance = NULL;
-    }
-    
-    if (Dmod_IsFunctionConnected(Dmod_Printf)) {
-        Dmod_Printf("[dmntp] deinitialized\n");
-    }
+    dmntp_destroy(g_instance); g_instance = NULL;
+    dmntp_query_deinit();
     return 0;
 }

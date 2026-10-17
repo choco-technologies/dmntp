@@ -12,10 +12,10 @@
 #include <stdint.h>
 
 /**
- * NTP timestamp - 64-bit fraction part at 32-bit resolution.
+ * NTP timestamp: 32-bit seconds plus a 32-bit binary fraction.
  *
  * NTP uses 1900-01-01 as epoch, unlike Unix 1970-01-01.
- * Seconds are unsigned 32-bit (wrap in 2106), fraction is 2^-32 seconds.
+ * Seconds are unsigned 32-bit (wrap in 2036), fraction is 2^-32 seconds.
  */
 typedef struct __attribute__((packed))
 {
@@ -31,7 +31,7 @@ typedef struct __attribute__((packed))
 typedef struct __attribute__((packed))
 {
     /* Byte 0 */
-    uint8_t  li_vn_mode;   /**< [2:7] Leap Indicator, [1:2] Version, [0] Mode */
+    uint8_t  li_vn_mode;   /**< [7:6] Leap Indicator, [5:3] Version, [2:0] Mode */
 
     /* Byte 1 */
     uint8_t  stratum;      /**< Stratum (0=unspecified, 1=primary, 2+=secondary) */
@@ -42,24 +42,24 @@ typedef struct __attribute__((packed))
     /* Byte 3 */
     int8_t   precision;    /**< Clock precision (signed, in log2 seconds) */
 
-    /* Bytes 4-15 */
+    /* Bytes 4-11 */
     uint32_t root_delay;       /**< Root delay (32-bit, fixed point) */
     uint32_t root_dispersion;  /**< Root dispersion (32-bit, fixed point) */
 
-    /* Bytes 16-19 */
+    /* Bytes 12-15 */
     uint32_t ref_id;           /**< Reference clock identifier */
 
-    /* Bytes 20-27 */
+    /* Bytes 16-23 */
     dmntp_timestamp_t ref;     /**< Reference timestamp */
 
-    /* Bytes 28-35 */
+    /* Bytes 24-31 */
     dmntp_timestamp_t orig;    /**< Origin timestamp (T1) */
 
-    /* Bytes 36-43 */
+    /* Bytes 32-39 */
     dmntp_timestamp_t recv;    /**< Receive timestamp (T2) */
 
-    /* Bytes 44-51 */
-    dmntp_timestamp_t trans;   /**< Transmit timestamp (T4) */
+    /* Bytes 40-47 */
+    dmntp_timestamp_t trans;   /**< Transmit timestamp (T3) */
 } dmntp_packet_t;
 
 /** NTP packet size (48 bytes without authentication). */
@@ -91,7 +91,8 @@ typedef struct __attribute__((packed))
 #define DMNTP_STRATUM_UNSPECIFIED  0  /**< Unspecified or unavailable */
 #define DMNTP_STRATUM_PRIMARY      1  /**< Primary server (e.g., atomic clock) */
 #define DMNTP_STRATUM_MAX         15 /**< Maximum valid stratum (2-15 are secondary) */
-#define DMNTP_STRATUM_KISS        16 /**< Kiss-o'-Death (to be discarded) */
+#define DMNTP_STRATUM_KISS         0 /**< Kiss-o'-Death (to be discarded) */
+#define DMNTP_STRATUM_UNSYNCHRONIZED 16
 
 /**
  * NTP version (current is 4).
