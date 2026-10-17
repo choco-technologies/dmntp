@@ -62,10 +62,17 @@ set(DMOD_DIF_IMPLS          )
 dmod_add_library(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
     # List of source files - can include C and C++ files
     src/dmntp.c
+    src/dmntp_registrations.c
+    src/dmntp_codec.c
+    src/dmntp_servers.c
+    src/dmntp_discovery.c
+    src/dmntp_config.c
+    src/dmntp_query.c
 )
 
 target_include_directories(${DMOD_MODULE_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
 target_include_directories(${DMOD_MODULE_NAME}_if INTERFACE
@@ -74,7 +81,27 @@ target_include_directories(${DMOD_MODULE_NAME}_if INTERFACE
 
 # To depend on another module's headers, use:
 #   dmod_link_modules(${DMOD_MODULE_NAME}
-#       other_module@1.0
+#       other_module
 #   )
+dmod_link_modules(${DMOD_MODULE_NAME}
+    dmudp
+    dmip
+    dmroute
+    dmnetif
+    dmlist
+    dmosi
+    dmheap
+    dmdns
+)
+target_compile_options(dmntp PRIVATE -Werror=return-type -Werror=implicit-function-declaration)
 enable_testing()
 add_subdirectory(tests)
+
+# Tests need access to internal headers - after tests subdirectory is added
+if(TARGET test_dmntp)
+    target_include_directories(test_dmntp PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+endif()
+
+add_subdirectory(tests/probe)
