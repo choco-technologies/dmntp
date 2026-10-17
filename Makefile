@@ -1,5 +1,5 @@
 # #############################################################################
-# 
+#
 # 	This is an example of a simple library module.
 #
 # #############################################################################
@@ -24,7 +24,7 @@ DMOD_MODULE_VERSION=0.1
 DMOD_AUTHOR_NAME=Patryk Kubiak
 
 # The list of C sources
-DMOD_CSOURCES=src/dmntp.c
+DMOD_CSOURCES=src/dmntp.c src/dmntp_codec.c src/dmntp_config.c src/dmntp_discovery.c src/dmntp_query.c src/dmntp_registrations.c src/dmntp_servers.c
 
 # The list of C++ sources
 DMOD_CXXSOURCES=
