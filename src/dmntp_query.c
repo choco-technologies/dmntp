@@ -1,187 +1,291 @@
+/**
+ * @file dmntp_query.c
+ * @brief The exchanges with the servers and dmntp_sync().
+ *
+ * One exchange at a time (g_sync_lock): the request goes from a port of its
+ * own, the reply is taken by receive() - in the network's receive path - if
+ * it comes from that server and port and echoes the request's transmit
+ * timestamp (a random one), and the waiting thread is woken.
+ */
+
 #include "dmntp_internal.h"
 #include "dmudp.h"
 #include "dmdns.h"
+
 #include <string.h>
-#include <limits.h>
 
-typedef struct {
-    dmip_addr_t server;
-    uint16_t port;
-    uint32_t started;
-    dmntp_timestamp_t sent;
-    dmosi_semaphore_t ready;
-    bool received;
-    dmntp_result_t result;
-} query_t;
-static dmosi_mutex_t g_query_lock, g_receive_lock;
-static query_t* g_active;
-static uint32_t g_sequence, g_started;
+/** One exchange, while it is waited for */
+typedef struct
+{
+    dmip_addr_t         server;
+    uint16_t            port;           /* The local one */
+    dmntp_timestamp_t   nonce;          /* The request's transmit timestamp */
+    int64_t             sent_ns;
+    dmosi_semaphore_t   ready;
+    bool                done;
+    int                 result;
+    dmntp_sample_t      sample;
+} exchange_t;
 
-static dmntp_timestamp_t local_time(uint32_t ms)
+static dmosi_mutex_t    g_sync_lock;    /* One dmntp_sync() at a time */
+static dmosi_mutex_t    g_active_lock;  /* g_active, against receive() */
+static exchange_t*      g_active;
+
+/**
+ * @brief The local clock, in nanoseconds
+ */
+static int64_t local_ns(void)
 {
-    ms -= g_started;
-    dmntp_timestamp_t t = {DMNTP_EPOCH_OFFSET + ms / 1000, dmntp_ns_to_frac((ms % 1000) * 1000000u)};
-    return t;
+    return (int64_t)Dmod_GetUptime() * 1000000LL;
 }
-static double as_seconds(dmntp_timestamp_t t)
+
+/* ===========================================================================
+ *                                 Receiving
+ * ========================================================================== */
+
+/**
+ * @brief Whether a datagram is the reply to the exchange
+ */
+static bool is_reply(const exchange_t* x, const dmip_addr_t* src, uint16_t source_port, uint16_t dest_port)
 {
-    return (double)t.seconds + t.fraction / 4294967296.0;
+    return src != NULL && src->family == dmip_family_v4 && source_port == DMNTP_PORT &&
+           dest_port == x->port && memcmp(src->addr.v4, x->server.addr.v4, 4) == 0;
 }
-static int sample_response(query_t* q, const uint8_t* bytes, size_t length)
-{
-    dmntp_packet_t packet;
-    if (length < DMNTP_PACKET_SIZE) return -EBADMSG;
-    dmntp_packet_decode(bytes, &packet);
-    if (dmntp_packet_validate(&packet, length) ||
-        memcmp(&packet.orig, &q->sent, sizeof(q->sent)) ||
-        packet.recv.seconds < DMNTP_EPOCH_OFFSET || packet.trans.seconds < DMNTP_EPOCH_OFFSET)
-        return -EBADMSG;
-    uint32_t elapsed = (uint32_t)Dmod_GetUptime() - q->started;
-    dmntp_timestamp_t now = q->sent;
-    now.seconds += elapsed / 1000;
-    now = dmntp_timestamp_add_ns(now, (elapsed % 1000) * 1000000u);
-    int rc = dmntp_calculate_offset(&q->sent, &packet.recv, &packet.trans, &now,
-        &q->result.offset, &q->result.delay);
-    if (rc) return rc;
-    double root_delay = (double)(int32_t)packet.root_delay / 65536.0;
-    if (root_delay < 0) root_delay = 0;
-    q->result.distance = q->result.delay / 2 + root_delay / 2 + packet.root_dispersion / 65536.0;
-    return q->result.distance > DMNTP_MAX_ROOT_DISTANCE ? -EBADMSG : 0;
-}
-static void receive_response(const dmip_addr_t* src, uint16_t source_port, uint16_t dest_port,
-    dmnetif_iface_t iface, const uint8_t* bytes, size_t length)
+
+/**
+ * @brief The UDP handler of the exchanges' ports
+ */
+static void receive(const dmip_addr_t* src, uint16_t source_port, uint16_t dest_port,
+                    dmnetif_iface_t iface, const uint8_t* bytes, size_t length)
 {
     (void)iface;
-    dmosi_mutex_lock(g_receive_lock);
-    query_t* q = g_active;
-    if (q && !q->received && bytes && src && source_port == DMNTP_PORT && dest_port == q->port &&
-        src->family == dmip_family_v4 && !memcmp(src->addr.v4, q->server.addr.v4, 4) &&
-        !sample_response(q, bytes, length)) {
-        q->received = true;
-        dmosi_semaphore_post(q->ready, 1);
-    }
-    dmosi_mutex_unlock(g_receive_lock);
-}
-/* Module callback pointers need loader relocation, including on Cortex-M7. */
-static dmudp_datagram_handler_t const volatile receiver DMOD_GLOBAL_POINTER = receive_response;
+    int64_t received_ns = local_ns();
 
-int dmntp_query_init(void)
-{
-    g_query_lock = dmosi_mutex_create(false);
-    g_receive_lock = dmosi_mutex_create(false);
-    if (g_query_lock && g_receive_lock) return 0;
-    dmntp_query_deinit(); return -ENOMEM;
+    dmosi_mutex_lock(g_active_lock);
+    exchange_t* x = g_active;
+    if (x != NULL && !x->done && bytes != NULL && length >= DMNTP_PACKET_SIZE &&
+        is_reply(x, src, source_port, dest_port))
+    {
+        dmntp_packet_t reply;
+        dmntp_packet_decode(bytes, &reply);
+
+        /* (a reply to another request - e.g. an earlier one - is not this one's) */
+        if (reply.orig.seconds == x->nonce.seconds && reply.orig.fraction == x->nonce.fraction)
+        {
+            x->result = dmntp_packet_validate(&reply);
+            if (x->result == 0)
+                x->result = dmntp_sample(&reply, x->sent_ns, received_ns, &x->sample);
+            x->done = true;
+            (void)dmosi_semaphore_post(x->ready, 1);
+        }
+    }
+    dmosi_mutex_unlock(g_active_lock);
 }
-void dmntp_query_deinit(void)
+
+/* The loader relocates a module's GOT but not the pointers in its .data:
+ * the handler's address has to be taken through DMOD_GLOBAL_POINTER. */
+static dmudp_datagram_handler_t const volatile receiver DMOD_GLOBAL_POINTER = receive;
+
+/* ===========================================================================
+ *                                An exchange
+ * ========================================================================== */
+
+/**
+ * @brief Send the request and wait for the reply
+ */
+static int send_and_wait(exchange_t* x, uint32_t timeout_ms)
 {
-    if (g_query_lock) dmosi_mutex_destroy(g_query_lock);
-    if (g_receive_lock) dmosi_mutex_destroy(g_receive_lock);
-    g_query_lock = g_receive_lock = NULL;
+    dmntp_packet_t request;
+    uint8_t bytes[DMNTP_PACKET_SIZE];
+
+    dmntp_packet_init_client(&request);
+    x->nonce.seconds = dmosi_rand32();
+    x->nonce.fraction = dmosi_rand32();
+    request.trans = x->nonce;
+    dmntp_packet_encode(&request, bytes);
+
+    dmosi_mutex_lock(g_active_lock);
+    g_active = x;
+    dmosi_mutex_unlock(g_active_lock);
+
+    x->sent_ns = local_ns();
+    int rc = dmudp_send(&x->server, x->port, DMNTP_PORT, bytes, sizeof(bytes), timeout_ms);
+    if (rc == 0 && dmosi_semaphore_wait(x->ready, 1, (int32_t)timeout_ms) != 0)
+        rc = -ETIMEDOUT;
+
+    /* After this receive() no longer sees x (it lives on this stack) */
+    dmosi_mutex_lock(g_active_lock);
+    g_active = NULL;
+    rc = (rc == 0 && x->done) ? x->result : (rc == 0 ? -ETIMEDOUT : rc);
+    dmosi_mutex_unlock(g_active_lock);
+
+    return rc;
 }
-static int resolve_server(const char* host, dmip_addr_t* server, uint32_t timeout)
+
+/**
+ * @brief The first IPv4 address of a host
+ */
+static int resolve(const char* host, dmip_addr_t* address, uint32_t timeout_ms)
 {
-    dmip_addr_t* addresses = NULL; size_t count = 0;
-    int rc = dmdns_resolve(host, dmip_family_v4, &addresses, &count, timeout);
-    if (!rc && count) *server = addresses[0];
-    else if (!rc) rc = -ENODATA;
+    dmip_addr_t* addresses = NULL;
+    size_t count = 0;
+
+    int rc = dmdns_resolve(host, dmip_family_v4, &addresses, &count, timeout_ms);
+    if (rc == 0 && count == 0)
+        rc = -ENODATA;
+    if (rc == 0)
+        *address = addresses[0];
+
     Dmod_Free(addresses);
     return rc;
 }
-static int exchange(query_t* q, uint32_t timeout)
+
+/**
+ * @brief An exchange with a server
+ */
+static int ask(const char* host, uint32_t timeout_ms, dmntp_sample_t* sample)
 {
-    uint8_t bytes[DMNTP_PACKET_SIZE]; dmntp_packet_t packet;
-    dmntp_packet_init_client(&packet);
-    q->started = (uint32_t)Dmod_GetUptime();
-    q->sent = local_time(q->started);
-    /* Distinguish exchanges made in the same millisecond. */
-    q->sent.fraction += (++g_sequence & 0xffffu);
-    packet.trans = q->sent;
-    dmntp_packet_encode(&packet, bytes);
-    dmosi_mutex_lock(g_receive_lock); g_active = q; dmosi_mutex_unlock(g_receive_lock);
-    int rc = dmudp_send(&q->server, q->port, DMNTP_PORT, bytes, sizeof(bytes), timeout);
-    if (!rc) {
-        uint32_t elapsed = (uint32_t)Dmod_GetUptime() - q->started;
-        uint32_t remaining = elapsed < timeout ? timeout - elapsed : 0;
-        rc = dmosi_semaphore_wait(q->ready, 1, (int32_t)remaining);
-        if (rc) rc = -ETIMEDOUT;
+    exchange_t x;
+    memset(&x, 0, sizeof(x));
+
+    int rc = resolve(host, &x.server, timeout_ms);
+    if (rc != 0)
+        return rc;
+
+    x.ready = dmosi_semaphore_create(0, 1);
+    if (x.ready == NULL)
+        return -ENOMEM;
+
+    rc = dmudp_bind_any(receiver, &x.port);
+    if (rc == 0)
+    {
+        rc = send_and_wait(&x, timeout_ms);
+        dmudp_unbind(x.port);
     }
-    /* Drain any callback already using q before its semaphore/stack is freed. */
-    dmosi_mutex_lock(g_receive_lock); g_active = NULL; dmosi_mutex_unlock(g_receive_lock);
+    if (rc == 0)
+        *sample = x.sample;
+
+    dmosi_semaphore_destroy(x.ready);
     return rc;
 }
-static int query_server(const char* host, uint32_t timeout, dmntp_result_t* result)
+
+/* ===========================================================================
+ *                                 Syncing
+ * ========================================================================== */
+
+/**
+ * @brief Ask every server of a list: the samples of the ones that answered
+ *
+ * @return How many samples; *error: the last failure's error
+ */
+static size_t ask_all(dmntp_t ntp, uint32_t timeout_ms, dmntp_sample_t* samples, int* error)
 {
-    query_t q; memset(&q, 0, sizeof(q));
-    int rc = resolve_server(host, &q.server, timeout);
-    if (rc) return rc;
-    q.ready = dmosi_semaphore_create(0, 1);
-    if (!q.ready) return -ENOMEM;
-    rc = dmudp_bind_any(receiver, &q.port);
-    if (!rc) {
-        rc = exchange(&q, timeout);
-        dmudp_unbind(q.port);
+    size_t count = 0;
+
+    for (dmntp_server_t* s = ntp->servers; s != NULL; s = s->next)
+    {
+        int rc = ask(s->host, timeout_ms, &samples[count]);
+        if (rc == 0)
+            count++;
+        else
+            *error = rc;
     }
-    if (!rc) *result = q.result;
-    dmosi_semaphore_destroy(q.ready);
-    return rc;
+    return count;
 }
-static int finish_samples(const dmntp_result_t* samples, size_t count, uint64_t* seconds,
-    uint32_t* ns, uint32_t* rtt, uint32_t* jitter)
+
+/**
+ * @brief The time the samples agree on, now
+ */
+static int conclude(const dmntp_sample_t* samples, size_t count, dmntp_time_t* time)
 {
-    double offset, variation;
-    int rc = dmntp_select(samples, count, &offset, &variation);
-    if (rc) return rc;
-    double now = as_seconds(local_time((uint32_t)Dmod_GetUptime())) + offset - DMNTP_EPOCH_OFFSET;
-    if (now < 0 || now >= (double)(UINT32_MAX - DMNTP_EPOCH_OFFSET)) return -ERANGE;
-    *seconds = (uint64_t)now;
-    *ns = (uint32_t)((now - *seconds) * 1000000000.0);
-    double min_delay = samples[0].delay;
-    for (size_t i = 1; i < count; ++i) if (samples[i].delay < min_delay) min_delay = samples[i].delay;
-    if (rtt) *rtt = (uint32_t)(min_delay * 1000 + 0.5);
-    if (jitter) *jitter = (uint32_t)(variation * 1000 + 0.5);
+    int64_t offset_ns;
+    int rc = dmntp_select(samples, count, &offset_ns, &time->error_ns, &time->servers);
+    if (rc != 0)
+        return rc;
+
+    int64_t now = local_ns() + offset_ns;
+    if (now < 0)
+        return -ERANGE;
+    time->seconds = now / 1000000000LL;
+    time->nanosecond = (uint32_t)(now % 1000000000LL);
+
+    int64_t delay = samples[0].delay_ns;
+    for (size_t i = 1; i < count; i++)
+        delay = (samples[i].delay_ns < delay) ? samples[i].delay_ns : delay;
+    time->delay_us = (uint32_t)(delay / 1000);
     return 0;
 }
-int dmntp_query_sync(dmntp_t h, uint32_t timeout, uint64_t* seconds,
-    uint32_t* ns, uint32_t* rtt, uint32_t* jitter)
+
+dmod_dmntp_api_declaration(2.0, int, _sync_with, (dmntp_t ntp, uint32_t timeout_ms, dmntp_time_t* time))
 {
-    if (seconds) *seconds = 0;
-    if (ns) *ns = 0;
-    if (rtt) *rtt = 0;
-    if (jitter) *jitter = 0;
-    if (!dmntp_is_valid(h) || !seconds || !ns || timeout > 60000) return -EINVAL;
-    if (!timeout) timeout = 3000;
-    dmosi_mutex_lock(g_query_lock);
-    dmosi_mutex_lock(h->lock);
-    g_started = (uint32_t)Dmod_GetUptime();
-    dmntp_result_t samples[DMNTP_MAX_SERVERS]; size_t count = 0;
+    if (time == NULL)
+        return -EINVAL;
+    memset(time, 0, sizeof(*time));
+    if (!dmntp_is_valid(ntp) || timeout_ms > DMNTP_MAX_TIMEOUT_MS || g_sync_lock == NULL)
+        return -EINVAL;
+    if (timeout_ms == 0)
+        timeout_ms = DMNTP_DEFAULT_TIMEOUT_MS;
+
+    dmosi_mutex_lock(g_sync_lock);
+    dmosi_mutex_lock(ntp->lock);
+
     int rc = -ENODATA;
-    for (dmntp_server_t* s = h->servers; s; s = s->next) {
-        int result = query_server(s->host, timeout, &samples[count]);
-        if (!result) ++count;
-        else rc = result;
+    dmntp_sample_t* samples = (ntp->count > 0) ? Dmod_Malloc(ntp->count * sizeof(*samples)) : NULL;
+    if (samples == NULL && ntp->count > 0)
+        rc = -ENOMEM;
+    else if (samples != NULL)
+    {
+        size_t count = ask_all(ntp, timeout_ms, samples, &rc);
+        if (count > 0)
+            rc = conclude(samples, count, time);
+        Dmod_Free(samples);
     }
-    if (count) rc = finish_samples(samples, count, seconds, ns, rtt, jitter);
-    dmosi_mutex_unlock(h->lock);
-    dmosi_mutex_unlock(g_query_lock);
+
+    dmosi_mutex_unlock(ntp->lock);
+    dmosi_mutex_unlock(g_sync_lock);
+
+    if (rc != 0)
+        memset(time, 0, sizeof(*time));
     return rc;
 }
-dmod_dmntp_api_declaration(1.0, int, _sync_with, (dmntp_t h, uint32_t timeout,
-    uint64_t* seconds, uint32_t* ns, uint32_t* rtt, uint32_t* jitter))
+
+dmod_dmntp_api_declaration(2.0, int, _sync, (uint32_t timeout_ms, dmntp_time_t* time))
 {
-    return dmntp_query_sync(h, timeout, seconds, ns, rtt, jitter);
-}
-dmod_dmntp_api_declaration(1.0, int, _sync, (uint32_t timeout,
-    uint64_t* seconds, uint32_t* ns, uint32_t* rtt, uint32_t* jitter))
-{
-    dmntp_t original = dmntp_get_instance(), snapshot = NULL;
-    int rc = original && original->discover ? dmntp_discover(&snapshot) : 0;
-    if (!rc) rc = dmntp_query_sync(snapshot ? snapshot : original, timeout, seconds, ns, rtt, jitter);
-    else {
-        if (seconds) *seconds = 0;
-        if (ns) *ns = 0;
-        if (rtt) *rtt = 0;
-        if (jitter) *jitter = 0;
-    }
-    dmntp_destroy(snapshot);
+    if (time == NULL)
+        return -EINVAL;
+    memset(time, 0, sizeof(*time));
+
+    dmntp_t servers = dmntp_default_servers();
+    if (servers == NULL)
+        return -ENOMEM;
+
+    int rc = dmntp_sync_with(servers, timeout_ms, time);
+    dmntp_destroy(servers);
     return rc;
+}
+
+/* ===========================================================================
+ *                                Lifecycle
+ * ========================================================================== */
+
+int dmntp_query_init(void)
+{
+    g_sync_lock = dmosi_mutex_create(false);
+    g_active_lock = dmosi_mutex_create(false);
+    if (g_sync_lock == NULL || g_active_lock == NULL)
+    {
+        dmntp_query_deinit();
+        return -ENOMEM;
+    }
+    return 0;
+}
+
+void dmntp_query_deinit(void)
+{
+    if (g_sync_lock != NULL)
+        dmosi_mutex_destroy(g_sync_lock);
+    if (g_active_lock != NULL)
+        dmosi_mutex_destroy(g_active_lock);
+    g_sync_lock = NULL;
+    g_active_lock = NULL;
 }
