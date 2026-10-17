@@ -51,7 +51,7 @@ set(DMOD_DMR_PATH           ${CMAKE_CURRENT_SOURCE_DIR}/dmntp.dmr)
 set(DMOD_MAL_IMPLS          )
 
 # List of DIF interfaces implemented by this module (leave empty if none)
-set(DMOD_DIF_IMPLS          )
+set(DMOD_DIF_IMPLS          dmutc)
 
 #
 #   dmod_add_library - create a library module
@@ -88,9 +88,11 @@ dmod_link_modules(${DMOD_MODULE_NAME}
     dmip
     dmroute
     dmnetif
-    dmlist
     dmosi
-    dmheap
     dmdns
+    dmutc
 )
 target_compile_options(dmntp PRIVATE -Werror=return-type -Werror=implicit-function-declaration)
+
+enable_testing()
+add_subdirectory(tests)

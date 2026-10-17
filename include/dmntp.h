@@ -1,6 +1,21 @@
 #ifndef DMNTP_H
 #define DMNTP_H
 
+/**
+ * @file dmntp.h
+ * @brief dmntp - the time of NTP servers (SNTP client, NTPv4, IPv4).
+ *
+ * dmntp_sync() asks the servers once - each of them one request - and
+ * returns UTC together with how far it may be off. It keeps no clock of its
+ * own and never touches the RTC: dmutc does that. dmntp is one of dmutc's
+ * external UTC sources (the dmutc_read_source DIF): dmutc asks it after the
+ * start and then once a day, and sets the RTC from it.
+ *
+ * Servers: DMNTP_SERVERS (a comma-separated list) when it is set, else the
+ * ones the dmntp_provide_servers DIF reports (e.g. dmdhcp: DHCP option 42),
+ * else pool.ntp.org and time.google.com.
+ */
+
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -13,142 +28,112 @@ extern "C" {
 #endif
 
 /**
- * @brief Opaque handle to a dmntp instance.
- *
- * The struct definition lives in src/dmntp.c - callers only ever see this
- * forward declaration and pass the pointer between dmntp API functions.
+ * @brief A list of NTP servers (opaque)
  */
 typedef struct dmntp* dmntp_t;
 
 /**
- * @brief Sink callback for discovery providers feeding IPv4 servers.
+ * @brief What dmntp_sync() found out
+ */
+typedef struct
+{
+    int64_t     seconds;        /**< UTC: POSIX seconds, at the return of dmntp_sync() */
+    uint32_t    nanosecond;     /**< 0 .. 999999999 */
+    uint32_t    servers;        /**< The servers that agree on it */
+    uint64_t    error_ns;       /**< How far it may be from UTC: half the width of the servers' common interval */
+    uint32_t    delay_us;       /**< The shortest round trip of them */
+} dmntp_time_t;
+
+/**
+ * @brief Callback of a dmntp_provide_servers implementation: one server
  *
- * @param ctx        Opaque pointer passed through from the caller of the
- *                   discovery provider; never inspected by dmntp itself.
- * @param ipv4       Borrowed pointer to exactly four bytes of an IPv4
- *                   address in network byte order.
+ * @param ctx   As passed to dmntp_provide_servers()
+ * @param ipv4  The server's IPv4 address, four bytes in network order (borrowed)
  *
- * @return 0 to keep collecting, non-zero to abort the walk. The provider
- *         must not hold any lock that the sink needs, and the sink must
- *         not re-enter the provider.
+ * @return 0 to go on, else the provider stops
  */
 typedef int (*dmntp_server_sink_t)(void* ctx, const uint8_t* ipv4);
 
 /**
- * @brief DIF signature type for dmntp discovery providers.
+ * @brief DIF of a module that knows NTP servers - e.g. dmdhcp (option 42)
  *
- * Each provider publishes its own function via this type; dmntp walks every
- * provider once per sync() call (before falling back to the configured
- * server list) to collect IPv4 servers without taking a DHCP dependency.
+ * Asked on every dmntp_sync() (unless DMNTP_SERVERS is set): report what is
+ * valid now. Called from the syncing thread, never from a receive callback.
+ *
+ * @param add       Callback to report one server with
+ * @param sink_ctx  Context to pass back to `add`
  */
-typedef void (*dmod_dmntp_provide_servers_t)(dmntp_server_sink_t add, void* sink_ctx);
+dmod_dmntp_dif(1.0, void, _provide_servers, (dmntp_server_sink_t add, void* sink_ctx));
 
 /**
- * @brief DIF signature string for discovery providers.
+ * @brief Make an empty list of servers
  *
- * Literal storage avoids an unrelocated pointer in a module's read-only
- * data section.
+ * @return The list, NULL: no memory
  */
-#define dmod_dmntp_provide_servers_sig DMOD_DIF_SIGNATURE_PREFIX "_provide_servers@dmntp:1.0/0.1"
+dmod_dmntp_api(2.0, dmntp_t, _create, (void));
 
 /**
- * @brief Allocate a new dmntp handle.
+ * @brief Free a list made by dmntp_create()
  *
- * @return A valid handle on success, NULL if the allocation or the
- *         internal mutex could not be created. The handle starts empty
- *         (no servers configured); call dmntp_add_server() or set
- *         DMNTP_SERVERS in the environment before dmntp_sync().
+ * @param ntp The list (NULL: nothing)
  */
-dmod_dmntp_api(1.0, dmntp_t, _create, (void));
+dmod_dmntp_api(2.0, void, _destroy, (dmntp_t ntp));
 
 /**
- * @brief Free a handle created by dmntp_create().
+ * @brief Whether a list is a valid one
  *
- * Safe to call with NULL or with a handle from another module that was
- * never initialised. After the call the handle is invalid and must not
- * be passed to any other dmntp API.
+ * @param ntp The list
  *
- * @param handle Handle returned by dmntp_create(); may be NULL.
+ * @return true: made by dmntp_create() and not freed
  */
-dmod_dmntp_api(1.0, void, _destroy, (dmntp_t handle));
+dmod_dmntp_api(2.0, bool, _is_valid, (dmntp_t ntp));
 
 /**
- * @brief Check whether a handle is currently valid.
+ * @brief Add a server to a list
  *
- * @param handle Handle to test; may be NULL.
+ * @param ntp   The list
+ * @param host  An IPv4 address ("192.0.2.1") or a name ("pool.ntp.org"), copied
  *
- * @return true if handle is non-NULL and its magic field matches
- *         DMNTP_MAGIC, false otherwise.
+ * @return 0 (also when it is there already), -EINVAL, -ENOMEM
  */
-dmod_dmntp_api(1.0, bool, _is_valid, (dmntp_t handle));
+dmod_dmntp_api(2.0, int, _add_server, (dmntp_t ntp, const char* host));
 
 /**
- * @brief Append a server to the handle's static list.
+ * @brief Remove a server from a list
  *
- * @param handle Valid dmntp handle.
- * @param host   IPv4 literal ("192.0.2.1") or DNS name ("pool.ntp.org").
+ * @param ntp   The list
+ * @param host  As given to dmntp_add_server()
  *
- * @return 0 on success, -EINVAL if the handle or host is invalid,
- *         -ENOSPC if the handle already holds 8 distinct servers,
- *         -ENOMEM on allocation failure. Duplicate adds succeed without
- *         adding another entry.
+ * @return 0, -ENOENT: not in the list, -EINVAL
  */
-dmod_dmntp_api(1.0, int, _add_server, (dmntp_t handle, const char* host));
+dmod_dmntp_api(2.0, int, _remove_server, (dmntp_t ntp, const char* host));
 
 /**
- * @brief Remove a server from the handle's static list.
+ * @brief The time of the servers (see the file's description for which ones)
  *
- * @param handle Valid dmntp handle.
- * @param host   Same string that was passed to dmntp_add_server().
+ * Blocks: each server is resolved and asked in turn. Must not be called
+ * from the network's receive path.
  *
- * @return 0 on success, -ENOENT if the host is not in the list,
- *         -EINVAL if the handle is invalid.
+ * @param timeout_ms    For each name lookup and each exchange (0: 3000 ms, at most 60000 ms)
+ * @param time          The time, cleared on failure
+ *
+ * @return 0; -ENODATA: no server answered; -EAGAIN: no majority of them
+ *         agrees; -EINVAL; else the error of the last server that failed
  */
-dmod_dmntp_api(1.0, int, _remove_server, (dmntp_t handle, const char* host));
+dmod_dmntp_api(2.0, int, _sync, (uint32_t timeout_ms, dmntp_time_t* time));
 
 /**
- * @brief Block until time has been sampled from at least one server.
+ * @brief The time of the servers of a list
  *
- * Resolves the configured server list (DMNTP_SERVERS environment plus
- * any discovery providers), runs the Marzullo selection over the
- * responses and writes the best UTC time back to the caller. No RTC is
- * touched and no background polling is started.
+ * As dmntp_sync(), with the servers of `ntp` only.
  *
- * Must not be called from a network receive callback (the pump must
- * stay runnable while sync() blocks on a semaphore).
+ * @param ntp           The list
+ * @param timeout_ms    For each name lookup and each exchange (0: 3000 ms, at most 60000 ms)
+ * @param time          The time, cleared on failure
  *
- * @param timeout_ms   Per-DNS attempt and per-NTP exchange; 0 selects
- *                     3000 ms. Maximum 60000 ms.
- * @param seconds      Required output: POSIX UTC seconds since 1970.
- * @param nanoseconds  Required output: sub-second component.
- * @param rtt_ms       Optional round-trip time in milliseconds (NULL ok).
- * @param jitter_ms    Optional jitter estimate in milliseconds (NULL ok).
- *
- * @return 0 on success, negative errno on failure. All supplied outputs
- *         are zeroed on failure. Returned time is NTP era 0 (1970..2036).
+ * @return As dmntp_sync()
  */
-dmod_dmntp_api(1.0, int, _sync, (uint32_t timeout_ms, uint64_t* seconds,
-    uint32_t* nanoseconds, uint32_t* rtt_ms, uint32_t* jitter_ms));
-
-/**
- * @brief Block until time has been sampled using the handle's own list.
- *
- * Same semantics as dmntp_sync() except the caller supplies the handle
- * (and therefore the server list) instead of the module-level singleton.
- *
- * @param handle       Valid dmntp handle with servers configured.
- * @param timeout_ms   Per-DNS attempt and per-NTP exchange; 0 selects
- *                     3000 ms. Maximum 60000 ms.
- * @param seconds      Required output: POSIX UTC seconds since 1970.
- * @param nanoseconds  Required output: sub-second component.
- * @param rtt_ms       Optional round-trip time in milliseconds (NULL ok).
- * @param jitter_ms    Optional jitter estimate in milliseconds (NULL ok).
- *
- * @return 0 on success, negative errno on failure. All supplied outputs
- *         are zeroed on failure.
- */
-dmod_dmntp_api(1.0, int, _sync_with, (dmntp_t handle, uint32_t timeout_ms,
-    uint64_t* seconds, uint32_t* nanoseconds, uint32_t* rtt_ms, uint32_t* jitter_ms));
+dmod_dmntp_api(2.0, int, _sync_with, (dmntp_t ntp, uint32_t timeout_ms, dmntp_time_t* time));
 
 #ifdef __cplusplus
 }

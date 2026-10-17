@@ -111,10 +111,9 @@ typedef struct __attribute__((packed))
 #define DMNTP_EPOCH_OFFSET 2208988800U
 
 /**
- * Max valid root distance (in seconds).
- * RFC 5905 suggests 1 second as a reasonable maximum.
+ * Max valid root distance, in nanoseconds (RFC 5905: 1 second).
  */
-#define DMNTP_MAX_ROOT_DISTANCE 1.0
+#define DMNTP_MAX_ROOT_DISTANCE_NS 1000000000LL
 
 /**
  * Extract Leap Indicator from li_vn_mode byte.

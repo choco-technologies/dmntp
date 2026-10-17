@@ -1,304 +1,205 @@
 /**
  * @file dmntp_codec.c
- * @brief NTP protocol primitives - time conversions, packet encode/decode,
- *        offset / jitter calculations and the Marzullo selector.
+ * @brief The protocol's arithmetic: timestamps, packets, the result of an
+ *        exchange and the selection of the offset the servers agree on.
+ *
+ * Integer nanoseconds only: the offset of UTC from the local clock is about
+ * 1.8e18 ns, an int64_t holds 9.2e18.
  */
 
 #include "dmntp_internal.h"
 
 #include <string.h>
 
+#define NS_PER_SECOND       1000000000LL
+#define ERA_SECONDS         4294967296LL    /* 2^32: one NTP era */
 
 /* ===========================================================================
- *                         NTP <-> Unix time conversions
+ *                                Timestamps
  * ========================================================================== */
 
 /**
- * @brief Convert NTP seconds-since-1900 to POSIX Unix seconds.
+ * @brief Nanoseconds of a 2^-32 s fraction
  */
-uint64_t dmntp_ntp_to_unix(uint32_t sec)
+static int64_t fraction_to_ns(uint32_t fraction)
 {
-    if (sec < DMNTP_EPOCH_OFFSET) {
-        return 0;
-    }
-
-    return (uint64_t)sec - DMNTP_EPOCH_OFFSET;
+    return (int64_t)(((uint64_t)fraction * (uint64_t)NS_PER_SECOND) >> 32);
 }
 
 /**
- * @brief Convert POSIX Unix seconds to NTP seconds-since-1900.
+ * @brief Nanoseconds of a 16.16 fixed point number of seconds
+ *        (root delay, root dispersion)
  */
-uint32_t dmntp_unix_to_ntp(uint64_t sec)
+static int64_t short_to_ns(uint32_t value)
 {
-    if (sec > UINT32_MAX - DMNTP_EPOCH_OFFSET) {
-        return 0;
-    }
-
-    return (uint32_t)(sec + DMNTP_EPOCH_OFFSET);
+    return (int64_t)(((uint64_t)value * (uint64_t)NS_PER_SECOND) >> 16);
 }
 
-/**
- * @brief Convert an NTP 2^-32 fraction to nanoseconds.
- */
-uint32_t dmntp_frac_to_ns(uint32_t fraction)
+int64_t dmntp_timestamp_to_ns(const dmntp_timestamp_t* t)
 {
-    return (uint32_t)(((uint64_t)fraction * 1000000000ULL) >> 32);
+    int64_t seconds = (int64_t)t->seconds;
+
+    if ((t->seconds & 0x80000000u) == 0)
+        seconds += ERA_SECONDS;         /* (era 1: from February 2036) */
+
+    return (seconds - (int64_t)DMNTP_EPOCH_OFFSET) * NS_PER_SECOND + fraction_to_ns(t->fraction);
 }
-
-/**
- * @brief Convert nanoseconds to an NTP 2^-32 fraction.
- */
-uint32_t dmntp_ns_to_frac(uint32_t ns)
-{
-    return (uint32_t)(((uint64_t)ns << 32) / 1000000000ULL);
-}
-
-/**
- * @brief Add an integer number of nanoseconds to an NTP timestamp.
- */
-dmntp_timestamp_t dmntp_timestamp_add_ns(dmntp_timestamp_t ts, uint32_t ns)
-{
-    uint64_t sum = (uint64_t)ts.fraction + (((uint64_t)ns << 32) / 1000000000ULL);
-
-    ts.seconds += (uint32_t)(sum >> 32);
-    ts.fraction = (uint32_t)sum;
-
-    return ts;
-}
-
 
 /* ===========================================================================
- *                            Packet construction
+ *                                 Packets
  * ========================================================================== */
 
-/**
- * @brief Fill a packet with client-mode defaults (VN=4, mode=3).
- */
-void dmntp_packet_init_client(dmntp_packet_t* pkt)
+void dmntp_packet_init_client(dmntp_packet_t* packet)
 {
-    memset(pkt, 0, sizeof(*pkt));
-    pkt->li_vn_mode = DMNTP_LI_VN_MODE(0, 4, DMNTP_MODE_CLIENT);
+    memset(packet, 0, sizeof(*packet));
+    packet->li_vn_mode = DMNTP_LI_VN_MODE(0, DMNTP_VERSION_4, DMNTP_MODE_CLIENT);
 }
 
 /**
- * @brief Reject obviously broken replies (wrong version, mode, stratum, ...).
- */
-int dmntp_packet_validate(const dmntp_packet_t* pkt, size_t size)
-{
-    if (!pkt || size < DMNTP_PACKET_SIZE) {
-        return -EBADMSG;
-    }
-
-    if (DMNTP_VN(pkt) != 4) {
-        return -EBADMSG;
-    }
-
-    if (DMNTP_MODE(pkt) != DMNTP_MODE_SERVER) {
-        return -EBADMSG;
-    }
-
-    if (DMNTP_LI(pkt) == 3) {
-        return -EBADMSG;
-    }
-
-    if (pkt->stratum < 1 || pkt->stratum > 15) {
-        return -EBADMSG;
-    }
-
-    return 0;
-}
-
-
-/* ===========================================================================
- *                            Offset / jitter math
- * ========================================================================== */
-
-/**
- * @brief Signed difference between two NTP timestamps, in seconds.
- */
-static double difference(const dmntp_timestamp_t* a, const dmntp_timestamp_t* b)
-{
-    return (double)((int64_t)a->seconds - b->seconds) +
-           (double)((int64_t)a->fraction - b->fraction) / 4294967296.0;
-}
-
-/**
- * @brief Standard NTP offset / round-trip delay calculation.
- */
-int dmntp_calculate_offset(const dmntp_timestamp_t* t1, const dmntp_timestamp_t* t2,
-    const dmntp_timestamp_t* t3, const dmntp_timestamp_t* t4, double* offset, double* delay)
-{
-    if (!t1 || !t2 || !t3 || !t4 || !offset || !delay) {
-        return -EINVAL;
-    }
-
-    double processing = difference(t3, t2);
-    double elapsed = difference(t4, t1);
-
-    if (processing < 0 || elapsed < processing) {
-        return -EBADMSG;
-    }
-
-    *offset = (difference(t2, t1) + difference(t3, t4)) / 2;
-    *delay = elapsed - processing;
-
-    return 0;
-}
-
-/**
- * @brief Plain Newton's-method square root - avoid libm dependency.
- */
-static double square_root(double value)
-{
-    if (value <= 0) {
-        return 0;
-    }
-
-    double x = (value > 1) ? value : 1;
-
-    for (unsigned i = 0; i < 64; ++i) {
-        double next = (x + value / x) / 2;
-        if (next == x) break;
-        x = next;
-    }
-
-    return x;
-}
-
-/**
- * @brief RMS jitter across an array of offset samples.
- */
-double dmntp_calculate_jitter(const double* offsets, size_t count)
-{
-    if (!offsets || count < 2) {
-        return 0;
-    }
-
-    double mean = 0;
-    double sum = 0;
-
-    for (size_t i = 0; i < count; ++i) {
-        mean += offsets[i] / count;
-    }
-
-    for (size_t i = 0; i < count; ++i) {
-        double d = offsets[i] - mean;
-        sum += d * d;
-    }
-
-    return square_root(sum / (count - 1));
-}
-
-
-/* ===========================================================================
- *                          Wire-format encode / decode
- * ========================================================================== */
-
-/**
- * @brief Read a big-endian 32-bit value from a byte buffer.
+ * @brief A 32-bit big endian number
  */
 static uint32_t read32(const uint8_t* b)
 {
-    return ((uint32_t)b[0] << 24) |
-           ((uint32_t)b[1] << 16) |
-           ((uint32_t)b[2] << 8) |
-            (uint32_t)b[3];
+    return ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) | ((uint32_t)b[2] << 8) | (uint32_t)b[3];
 }
 
 /**
- * @brief Decode a packet received off the wire.
+ * @brief A 32-bit number, big endian
  */
+static void write32(uint8_t* b, uint32_t value)
+{
+    b[0] = (uint8_t)(value >> 24);
+    b[1] = (uint8_t)(value >> 16);
+    b[2] = (uint8_t)(value >> 8);
+    b[3] = (uint8_t)value;
+}
+
+void dmntp_packet_encode(const dmntp_packet_t* packet, uint8_t* bytes)
+{
+    /* The first four bytes are single bytes, the rest 32-bit words */
+    memcpy(bytes, packet, 4);
+
+    for (size_t i = 4; i < DMNTP_PACKET_SIZE; i += 4)
+    {
+        uint32_t value;
+        memcpy(&value, (const uint8_t*)packet + i, sizeof(value));
+        write32(bytes + i, value);
+    }
+}
+
 void dmntp_packet_decode(const uint8_t* bytes, dmntp_packet_t* packet)
 {
     memcpy(packet, bytes, 4);
 
-    for (size_t i = 4; i < DMNTP_PACKET_SIZE; i += 4) {
-        uint32_t v = read32(bytes + i);
-        memcpy((uint8_t*)packet + i, &v, 4);
+    for (size_t i = 4; i < DMNTP_PACKET_SIZE; i += 4)
+    {
+        uint32_t value = read32(bytes + i);
+        memcpy((uint8_t*)packet + i, &value, sizeof(value));
     }
 }
 
-/**
- * @brief Encode a packet for transmission over the wire.
- */
-void dmntp_packet_encode(const dmntp_packet_t* packet, uint8_t* bytes)
+int dmntp_packet_validate(const dmntp_packet_t* packet)
 {
-    memcpy(bytes, packet, 4);
+    unsigned version = DMNTP_VN(packet);
 
-    for (size_t i = 4; i < DMNTP_PACKET_SIZE; i += 4) {
-        uint32_t v;
-        memcpy(&v, (const uint8_t*)packet + i, 4);
+    if (version != 3 && version != DMNTP_VERSION_4)
+        return -EBADMSG;
+    if (DMNTP_MODE(packet) != DMNTP_MODE_SERVER)
+        return -EBADMSG;
+    if (DMNTP_LI(packet) == DMNTP_LI_ALARM)
+        return -EBADMSG;                /* (not synchronized itself) */
+    if (packet->stratum == DMNTP_STRATUM_KISS || packet->stratum > DMNTP_STRATUM_MAX)
+        return -EBADMSG;
+    if (packet->trans.seconds == 0 && packet->trans.fraction == 0)
+        return -EBADMSG;
 
-        bytes[i]     = v >> 24;
-        bytes[i + 1] = v >> 16;
-        bytes[i + 2] = v >> 8;
-        bytes[i + 3] = v;
-    }
+    return 0;
 }
-
 
 /* ===========================================================================
- *                              Marzullo selection
- *
- * Maximum interval overlap (Marzullo): require a strict majority when
- * multiple sources reply. Reject disagreement rather than trusting an
- * outlier.
+ *                            Result of an exchange
+ * ========================================================================== */
+
+int dmntp_sample(const dmntp_packet_t* reply, int64_t sent_ns, int64_t received_ns, dmntp_sample_t* sample)
+{
+    int64_t t2 = dmntp_timestamp_to_ns(&reply->recv);
+    int64_t t3 = dmntp_timestamp_to_ns(&reply->trans);
+    int64_t processing = t3 - t2;
+    int64_t elapsed = received_ns - sent_ns;
+
+    /* The local clock counts milliseconds: a reply within one may show 0 elapsed */
+    if (processing < 0 || elapsed < 0 || elapsed + DMNTP_CLOCK_RESOLUTION_NS < processing)
+        return -EBADMSG;
+
+    sample->offset_ns = ((t2 - sent_ns) + (t3 - received_ns)) / 2;
+    sample->delay_ns = (elapsed > processing) ? elapsed - processing : 0;
+
+    int64_t root_delay = short_to_ns(reply->root_delay);
+    int64_t root_dispersion = short_to_ns(reply->root_dispersion);
+
+    /* RFC 5905's root distance, with the local clock's resolution */
+    sample->distance_ns = (sample->delay_ns + root_delay) / 2 + root_dispersion + DMNTP_CLOCK_RESOLUTION_NS;
+    if (sample->distance_ns > DMNTP_MAX_ROOT_DISTANCE_NS)
+        return -EBADMSG;
+
+    return 0;
+}
+
+/* ===========================================================================
+ *                          Selection (Marzullo)
  * ========================================================================== */
 
 /**
- * @brief Marzullo selection over a set of NTP samples.
+ * @brief How many samples' intervals contain a point
  */
-int dmntp_select(const dmntp_result_t* samples, size_t count, double* offset, double* jitter)
+static uint32_t containing(const dmntp_sample_t* samples, size_t count, int64_t point)
 {
-    if (!samples || !count || count > DMNTP_MAX_SERVERS || !offset || !jitter) {
+    uint32_t n = 0;
+
+    for (size_t i = 0; i < count; i++)
+    {
+        if (point >= samples[i].offset_ns - samples[i].distance_ns &&
+            point <= samples[i].offset_ns + samples[i].distance_ns)
+            n++;
+    }
+    return n;
+}
+
+int dmntp_select(const dmntp_sample_t* samples, size_t count, int64_t* offset_ns, uint64_t* error_ns, uint32_t* agreeing)
+{
+    if (samples == NULL || count == 0)
         return -EINVAL;
-    }
 
-    size_t best = 0;
-    double point = 0;
-
-    for (size_t i = 0; i < count; ++i) {
-        double candidate = samples[i].offset - samples[i].distance;
-        size_t overlap = 0;
-
-        for (size_t j = 0; j < count; ++j) {
-            if (candidate >= samples[j].offset - samples[j].distance &&
-                candidate <= samples[j].offset + samples[j].distance) {
-                ++overlap;
-            }
-        }
-
-        if (overlap > best) {
-            best = overlap;
-            point = candidate;
+    /* The most covered point is the start of one of the intervals */
+    int64_t point = 0;
+    uint32_t best = 0;
+    for (size_t i = 0; i < count; i++)
+    {
+        int64_t start = samples[i].offset_ns - samples[i].distance_ns;
+        uint32_t n = containing(samples, count, start);
+        if (n > best)
+        {
+            best = n;
+            point = start;
         }
     }
-
-    if (best <= count / 2) {
+    if (best <= count / 2)
         return -EAGAIN;
-    }
 
-    double low = -1e20;
-    double high = 1e20;
-    double offsets[DMNTP_MAX_SERVERS];
-    size_t used = 0;
-
-    for (size_t i = 0; i < count; ++i) {
-        double l = samples[i].offset - samples[i].distance;
-        double h = samples[i].offset + samples[i].distance;
-
-        if (point < l || point > h) {
+    /* The intervals that contain it, intersected */
+    int64_t low = INT64_MIN, high = INT64_MAX;
+    for (size_t i = 0; i < count; i++)
+    {
+        int64_t start = samples[i].offset_ns - samples[i].distance_ns;
+        int64_t end = samples[i].offset_ns + samples[i].distance_ns;
+        if (point < start || point > end)
             continue;
-        }
-
-        if (l > low) low = l;
-        if (h < high) high = h;
-
-        offsets[used++] = samples[i].offset;
+        low = (start > low) ? start : low;
+        high = (end < high) ? end : high;
     }
 
-    *offset = (low + high) / 2;
-    *jitter = dmntp_calculate_jitter(offsets, used);
-
+    *offset_ns = low + (high - low) / 2;
+    *error_ns = (uint64_t)(high - low) / 2u;
+    *agreeing = best;
     return 0;
 }

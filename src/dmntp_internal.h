@@ -3,222 +3,168 @@
 
 /**
  * @file dmntp_internal.h
- * @brief Shared declarations for dmntp translation units.
+ * @brief What the dmntp sources share: the list of servers, the protocol
+ *        arithmetic (dmntp_codec.c) and the exchanges (dmntp_query.c).
  *
- * Only the dmntp sources include this header - public API lives in
- * include/dmntp.h and include/dmntp_protocol.h.
+ * Times are int64_t nanoseconds: UTC ones since 1970-01-01, local ones
+ * since the start (Dmod_GetUptime()). No floating point.
  */
 
 #include <errno.h>
 
 #include "dmod.h"
+#include "dmosi.h"
 #include "dmntp.h"
 #include "dmntp_protocol.h"
-#include "dmosi.h"
 
-/** Magic value stored at the start of every dmntp handle. */
-#define DMNTP_MAGIC 0x444D4E54U
+/** dmntp_t's magic: "DMNT" */
+#define DMNTP_MAGIC             0x444D4E54u
 
-/** Maximum number of distinct servers a single handle keeps. */
-#define DMNTP_MAX_SERVERS 8u
+/** Default timeout of a name lookup and of an exchange */
+#define DMNTP_DEFAULT_TIMEOUT_MS    3000u
 
-/** Singly-linked list node holding a copy of the user-supplied host string. */
-typedef struct dmntp_server {
-    char* host;
-    struct dmntp_server* next;
+/** Longest timeout accepted */
+#define DMNTP_MAX_TIMEOUT_MS    60000u
+
+/** Resolution of the local clock (Dmod_GetUptime(): milliseconds) */
+#define DMNTP_CLOCK_RESOLUTION_NS   1000000LL
+
+/** A server of a list: its name or address, as given */
+typedef struct dmntp_server
+{
+    struct dmntp_server*    next;
+    char*                   host;
 } dmntp_server_t;
 
-/** Concrete handle struct - definition is private to the dmntp sources. */
-struct dmntp {
-    uint32_t magic;
-    dmntp_server_t* servers;
-    size_t server_count;
-    dmosi_mutex_t lock;
-    bool discover;
+/** A list of servers (dmntp_t) */
+struct dmntp
+{
+    uint32_t            magic;
+    dmosi_mutex_t       lock;
+    dmntp_server_t*     servers;
+    size_t              count;
 };
 
-/** Marzullo sample produced by one NTP exchange. */
-typedef struct {
-    double offset;
-    double delay;
-    double distance;
-} dmntp_result_t;
+/** One exchange's result */
+typedef struct
+{
+    int64_t     offset_ns;      /**< UTC minus the local clock */
+    int64_t     delay_ns;       /**< Round trip, without the server's own time */
+    int64_t     distance_ns;    /**< How far offset_ns may be off */
+} dmntp_sample_t;
+
+/* ---- dmntp_codec.c: the protocol's arithmetic ---- */
 
 /**
- * @brief Convert an NTP seconds-since-1900 value to POSIX Unix seconds.
+ * @brief An NTP timestamp as UTC nanoseconds since 1970
  *
- * @param seconds NTP seconds field.
+ * NTP's seconds wrap in February 2036: a timestamp before 1968 (the top
+ * bit clear) is taken as one of the next era - right until 2104.
  *
- * @return Equivalent Unix timestamp, with the NTP era wrap handled.
+ * @param t The timestamp
+ *
+ * @return Nanoseconds since 1970-01-01 UTC
  */
-uint64_t dmntp_ntp_to_unix(uint32_t seconds);
+int64_t dmntp_timestamp_to_ns(const dmntp_timestamp_t* t);
 
 /**
- * @brief Convert a POSIX Unix seconds value to NTP seconds-since-1900.
+ * @brief A client's request: version 4, mode client, everything else 0
  *
- * @param seconds Unix timestamp.
- *
- * @return NTP seconds field (era 0 until 2106).
+ * @param packet    The packet to fill
  */
-uint32_t dmntp_unix_to_ntp(uint64_t seconds);
+void dmntp_packet_init_client(dmntp_packet_t* packet);
 
 /**
- * @brief Convert an NTP 2^-32 fraction to nanoseconds.
+ * @brief A packet as it goes on the wire (big endian)
  *
- * @param fraction NTP fraction field.
- *
- * @return Nanoseconds equivalent.
- */
-uint32_t dmntp_frac_to_ns(uint32_t fraction);
-
-/**
- * @brief Convert nanoseconds to an NTP 2^-32 fraction.
- *
- * @param ns Nanoseconds value.
- *
- * @return NTP fraction field.
- */
-uint32_t dmntp_ns_to_frac(uint32_t ns);
-
-/**
- * @brief Add an integer number of nanoseconds to an NTP timestamp.
- *
- * @param ts Timestamp to advance.
- * @param ns Nanoseconds to add (must be < 1 s).
- *
- * @return ts + ns with carry into the seconds field if needed.
- */
-dmntp_timestamp_t dmntp_timestamp_add_ns(dmntp_timestamp_t ts, uint32_t ns);
-
-/**
- * @brief Fill a packet with client-mode defaults (VN=4, mode=3).
- *
- * @param pkt Packet to initialise; all fields are written.
- */
-void dmntp_packet_init_client(dmntp_packet_t* pkt);
-
-/**
- * @brief Validate that a received packet looks like a sane server reply.
- *
- * @param pkt  Packet to inspect (borrowed).
- * @param size Byte length actually received.
- *
- * @return 0 on success, -EBADMSG on any version/stratum/mode problem.
- */
-int dmntp_packet_validate(const dmntp_packet_t* pkt, size_t size);
-
-/**
- * @brief Compute offset and round-trip delay from the four timestamps.
- *
- * @param t1     Originate (client send) timestamp.
- * @param t2     Receive (server recv) timestamp.
- * @param t3     Transmit (server send) timestamp.
- * @param t4     Destination (client recv) timestamp.
- * @param offset Output: clock offset in seconds (signed).
- * @param delay  Output: round-trip delay in seconds (unsigned).
- *
- * @return 0 on success, negative errno on arithmetic failure.
- */
-int dmntp_calculate_offset(const dmntp_timestamp_t* t1, const dmntp_timestamp_t* t2,
-    const dmntp_timestamp_t* t3, const dmntp_timestamp_t* t4, double* offset, double* delay);
-
-/**
- * @brief Compute the root-mean-square jitter of a set of offsets.
- *
- * @param offsets Array of offset measurements in seconds.
- * @param count   Number of entries (must be >= 2).
- *
- * @return RMS deviation from the median.
- */
-double dmntp_calculate_jitter(const double* offsets, size_t count);
-
-/**
- * @brief Serialise an NTP packet to its on-wire byte representation.
- *
- * @param packet Packet to encode.
- * @param bytes  Output buffer of at least DMNTP_PACKET_SIZE bytes.
+ * @param packet    The packet
+ * @param bytes     DMNTP_PACKET_SIZE bytes
  */
 void dmntp_packet_encode(const dmntp_packet_t* packet, uint8_t* bytes);
 
 /**
- * @brief Parse a received NTP packet from its on-wire byte representation.
+ * @brief A packet from the wire
  *
- * @param bytes  Input buffer of at least DMNTP_PACKET_SIZE bytes.
- * @param packet Output: decoded packet.
+ * @param bytes     DMNTP_PACKET_SIZE bytes
+ * @param packet    The packet
  */
 void dmntp_packet_decode(const uint8_t* bytes, dmntp_packet_t* packet);
 
 /**
- * @brief Marzullo selection over a set of NTP samples.
+ * @brief Whether a reply is a usable server's one
  *
- * Picks the sample whose interval intersects the most other intervals,
- * falling back to the sample with the smallest distance if no
- * intersection exists.
+ * @param packet    The reply
  *
- * @param samples Array of Marzullo samples.
- * @param count   Number of samples.
- * @param offset  Output: selected clock offset in seconds.
- * @param jitter  Output: jitter estimate in seconds.
- *
- * @return 0 on success, -EINVAL on bad input.
+ * @return 0; -EBADMSG: not version 3/4, not a server, not synchronized,
+ *         a kiss-o'-death (stratum 0) or stratum above 15
  */
-int dmntp_select(const dmntp_result_t* samples, size_t count, double* offset, double* jitter);
+int dmntp_packet_validate(const dmntp_packet_t* packet);
 
 /**
- * @brief Free every server entry currently held by the handle.
+ * @brief The result of an exchange (RFC 5905's on-wire protocol)
  *
- * @param handle Valid dmntp handle.
+ * @param reply         The server's reply (validated)
+ * @param sent_ns       Local time the request was sent at
+ * @param received_ns   Local time the reply came at
+ * @param sample        The result
+ *
+ * @return 0; -EBADMSG: the times do not add up, or the server is too far
+ *         from a reference (root distance above 1 s)
  */
-void dmntp_clear_servers(dmntp_t handle);
+int dmntp_sample(const dmntp_packet_t* reply, int64_t sent_ns, int64_t received_ns, dmntp_sample_t* sample);
 
 /**
- * @brief Initialise the handle from DMNTP_SERVERS / built-in defaults.
+ * @brief The offset the samples agree on (Marzullo's algorithm)
  *
- * @param handle Valid dmntp handle.
+ * Each sample is the interval offset +/- distance. The point most of them
+ * contain is found; the intervals that contain it are intersected.
  *
- * @return 0 on success, negative errno on failure.
+ * @param samples   The samples
+ * @param count     How many
+ * @param offset_ns The middle of the intersection
+ * @param error_ns  Half its width
+ * @param agreeing  How many samples it is of
+ *
+ * @return 0; -EAGAIN: no more than half of them agree; -EINVAL: none
  */
-int dmntp_config_init(dmntp_t handle);
+int dmntp_select(const dmntp_sample_t* samples, size_t count, int64_t* offset_ns, uint64_t* error_ns, uint32_t* agreeing);
+
+/* ---- dmntp_query.c: the exchanges ---- */
 
 /**
- * @brief Return the module-level singleton handle (or NULL).
- */
-dmntp_t dmntp_get_instance(void);
-
-/**
- * @brief Snapshot the discovery-provided servers into a fresh handle.
+ * @brief Prepare the exchanges (dmod_init)
  *
- * @param snapshot Output: a new handle populated from the discovery DIF.
- *
- * @return 0 on success, negative errno on failure.
- */
-int dmntp_discover(dmntp_t* snapshot);
-
-/**
- * @brief Initialise the UDP query subsystem (binds the receive port).
- *
- * @return 0 on success, negative errno on failure.
+ * @return 0, -ENOMEM
  */
 int dmntp_query_init(void);
 
 /**
- * @brief Tear down the UDP query subsystem.
+ * @brief Free what dmntp_query_init() made (dmod_deinit)
  */
 void dmntp_query_deinit(void);
 
+/* ---- dmntp_servers.c, dmntp_config.c, dmntp_discovery.c: the servers ---- */
+
 /**
- * @brief Synchronous NTP query using the handle's server list.
+ * @brief Remove every server of a list
  *
- * @param handle     Valid dmntp handle with servers configured.
- * @param timeout    Per-server timeout in milliseconds.
- * @param seconds    Output: POSIX UTC seconds.
- * @param ns         Output: sub-second component in nanoseconds.
- * @param rtt        Output: round-trip time in milliseconds (may be NULL).
- * @param jitter     Output: jitter in milliseconds (may be NULL).
- *
- * @return 0 on success, negative errno on failure.
+ * @param ntp The list
  */
-int dmntp_query_sync(dmntp_t handle, uint32_t timeout, uint64_t* seconds,
-    uint32_t* ns, uint32_t* rtt, uint32_t* jitter);
+void dmntp_clear_servers(dmntp_t ntp);
+
+/**
+ * @brief The servers of dmntp_sync(): DMNTP_SERVERS, else the ones the
+ *        dmntp_provide_servers DIF reports, else the default ones
+ *
+ * @return A new list (to dmntp_destroy()), NULL: no memory
+ */
+dmntp_t dmntp_default_servers(void);
+
+/**
+ * @brief Add the servers the dmntp_provide_servers DIF reports
+ *
+ * @param ntp The list
+ */
+void dmntp_discover(dmntp_t ntp);
 
 #endif /* DMNTP_INTERNAL_H */
